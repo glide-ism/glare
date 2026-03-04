@@ -1,88 +1,102 @@
-import pyproj
-import xarray as xr
-import numpy as np
-import matplotlib.pyplot as plt
-from scipy.interpolate import RegularGridInterpolator
-from matplotlib.colors import LightSource
-import cupy as cp
+"""
+Compute monthly and daily solar potential for Wrangell ice cap.
 
-dem = xr.load_dataset('../data/cop30/cop90_reprojected.nc')
-
-z = cp.array(dem.elevation.values,dtype=cp.float32)
-max_zenith = cp.zeros(z.shape,dtype=cp.float32)
-max_j = cp.zeros(z.shape,dtype=cp.uint32)
-max_i = cp.zeros(z.shape,dtype=cp.uint32)
-step_size = cp.float32(1.0)
+Uses GLARE's SolarPotential class to compute terrain-corrected insolation
+accounting for slope, aspect, and self-shadowing from the DEM.
+"""
 
 import datetime
-import pytz
-from pysolar.solar import get_altitude, get_azimuth
 
-# Define location and time
-latitude = 61.0
-longitude = -143.0
+import cupy as cp
+import matplotlib.pyplot as plt
+import numpy as np
+import xarray as xr
+from matplotlib.colors import LightSource
 
-accumulated_sunlight_hours = cp.zeros_like(z)
-solar_potential = cp.zeros_like(z)
+from glare import SolarPotential
 
-dZdy,dZdx = cp.gradient(z,50)
-dZdy *= -1
+# Configuration
+DEM_PATH = '../data/cop30/cop90_reprojected.nc'
+GRID_RESOLUTION = 90.0  # meters
+LATITUDE = 61.0
+LONGITUDE = -143.0
+TIMEZONE = "America/Anchorage"
+YEAR = 2023
+MONTH = 4
+NUM_DAYS = 30  # April has 30 days
 
-for day in range(1,30):
-    for hour in range(0,24):
-        date = datetime.datetime(2023, 4, day, hour, 0, 0, tzinfo=pytz.timezone('America/Anchorage'))
+# Load DEM
+print(f"Loading DEM from {DEM_PATH}")
+dem = xr.load_dataset(DEM_PATH)
+print(f"DEM shape: {dem.elevation.shape}")
 
-        # Calculate angles
-        altitude = get_altitude(latitude, longitude, date)
-        azimuth = get_azimuth(latitude, longitude, date)
-        j_basis =  cp.float32(np.sin(np.deg2rad(azimuth)))
-        i_basis = -cp.float32(np.cos(np.deg2rad(azimuth)))
+# Initialize solar potential calculator
+print("Initializing SolarPotential calculator...")
+solar = SolarPotential(
+    dem=dem,
+    latitude=LATITUDE,
+    longitude=LONGITUDE,
+    grid_resolution=GRID_RESOLUTION,
+    timezone=TIMEZONE,
+)
 
-        ny,nx = z.shape
-        kernels = cp.RawModule(code=open('../../../glare/cuda/azimuth_trace.cu','r').read())
-        block_size = (16,16)
-        grid_size = (nx // 16 + 1, ny // 16 + 1)
+# Accumulate solar potential over the month
+print(f"Computing daily solar potential for April {YEAR}...")
+accumulated_sunlight_hours = cp.zeros_like(solar.z)
+daily_average_potential = cp.zeros_like(solar.z)
 
-        kernel = kernels.get_function('azimuth_trace')
-        kernel(grid_size,block_size,
-                (max_zenith,
-                 max_j,
-                 max_i,
-                 z,
-                 j_basis,
-                 i_basis,
-                 step_size,
-                 nx,ny))
+for day in range(1, NUM_DAYS + 1):
+    daily_sunlight = cp.zeros_like(solar.z)
+    daily_radiation = cp.zeros_like(solar.z)
 
-        zenith_deg = cp.rad2deg(cp.arctan(max_zenith/50.0))
-        z_i = altitude - zenith_deg
-        z_sig = 1./(1 + cp.exp(-z_i/0.1))
+    for hour in range(24):
+        date = datetime.datetime(
+            YEAR, MONTH, day, hour, 0, 0,
+            tzinfo=__import__('pytz').timezone(TIMEZONE)
+        )
 
-        sin_phi = cp.sin(cp.deg2rad(azimuth))
-        cos_phi = cp.cos(cp.deg2rad(azimuth))
+        from pysolar.solar import get_altitude, get_azimuth
+        altitude = get_altitude(LATITUDE, LONGITUDE, date)
+        azimuth = get_azimuth(LATITUDE, LONGITUDE, date)
 
-        sin_alpha = cp.sin(cp.deg2rad(altitude))
-        cos_alpha = cp.cos(cp.deg2rad(altitude))
+        # Only process if sun is above horizon
+        if altitude > 0:
+            shadow_mask = solar.compute_shadow_mask(altitude, azimuth)
+            incidence = solar.compute_incidence(altitude, azimuth)
 
-        s = cp.array([sin_phi*cos_alpha,cos_phi*cos_alpha,sin_alpha])
+            daily_sunlight += shadow_mask
+            daily_radiation += incidence * shadow_mask
 
-        incidence = (-dZdx * sin_phi*cos_alpha - dZdy * cos_phi*cos_alpha + sin_alpha)/(cp.sqrt(dZdx**2 + dZdy**2 + 1)) 
+    accumulated_sunlight_hours += daily_sunlight
+    daily_average_potential += daily_radiation
 
-        incidence[incidence<0] = 0.0
+# Average over month
+accumulated_sunlight_hours /= NUM_DAYS
+daily_average_potential /= NUM_DAYS
 
-        accumulated_sunlight_hours += z_sig
-        solar_potential += incidence * z_sig
+print(f"Mean daily sunlight hours: {accumulated_sunlight_hours.mean().get():.2f}")
+print(f"Mean daily solar potential: {daily_average_potential.mean().get():.4f}")
 
-
-accumulated_sunlight_hours /= 30
-solar_potential /= 30
-
+# Visualization
+print("Creating visualization...")
+z_cpu = solar.z.get()
 ls = LightSource(azdeg=315, altdeg=45)
-dx = dem.x[1]-dem.x[0]
-hs = ls.hillshade(z.get(), vert_exag=3, dx=dx.values, dy=dx.values)
-plt.imshow(hs,cmap=plt.cm.gray)
+dx = dem.x[1].item() - dem.x[0].item()  # Convert to float
+hs = ls.hillshade(z_cpu, vert_exag=3, dx=dx, dy=dx)
 
-#plt.imshow(z_sig.get(),alpha=0.25,cmap=plt.cm.plasma,vmin=0,vmax=1)
-plt.imshow(solar_potential.get(),alpha=0.5,cmap=plt.cm.plasma)
-#plt.imshow(accumulated_sunlight_hours.get(),alpha=0.5,cmap=plt.cm.plasma)
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# Hillshade with solar potential overlay
+axes[0].imshow(hs, cmap=plt.cm.gray)
+im0 = axes[0].imshow(daily_average_potential.get(), alpha=0.5, cmap=plt.cm.plasma)
+axes[0].set_title('Daily Average Solar Potential')
+plt.colorbar(im0, ax=axes[0], label='Incidence-weighted radiation')
+
+# Accumulated sunlight hours
+axes[1].imshow(hs, cmap=plt.cm.gray)
+im1 = axes[1].imshow(accumulated_sunlight_hours.get(), alpha=0.5, cmap=plt.cm.plasma)
+axes[1].set_title('Accumulated Sunlight Hours (April avg/day)')
+plt.colorbar(im1, ax=axes[1], label='Shadow-masked hours/day')
+
+plt.tight_layout()
 plt.show()

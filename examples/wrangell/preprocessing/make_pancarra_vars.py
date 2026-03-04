@@ -97,8 +97,8 @@ z_oro = panc.interpolate(X_,Y_,time_index=None,key='orog',method='cubic')
 t2m_fields = [panc.interpolate(X_,Y_,time_index=i,key='t2m',method='cubic') - 273 + lapse*(dem.elevation-z_oro) for i in range(12)]
 precip_fields = [panc.interpolate(X_,Y_,time_index=i,key='precip',method='cubic') for i in range(12)]
 
-t2m_fields = np.stack(t2m_fields,axis=0)
-precip_fields = np.stack(precip_fields,axis=0)/917*365/12
+t2m_fields = np.stack(t2m_fields,axis=0).astype(np.float32)
+precip_fields = np.stack(precip_fields,axis=0).astype(np.float32)/917*365/12
 
 t2m_da = xr.DataArray(
         t2m_fields,

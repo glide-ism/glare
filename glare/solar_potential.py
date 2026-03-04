@@ -1,5 +1,6 @@
 import calendar
 import datetime
+from pathlib import Path
 
 import cupy as cp
 import numpy as np
@@ -21,7 +22,7 @@ class SolarPotential:
         dem: xr.Dataset,
         latitude: float,
         longitude: float,
-        kernel_path: str = './cuda/azimuth_trace.cu',
+        kernel_path: str = None,
         grid_resolution: float = 90.0,
         step_size: float = 1.0,
         timezone: str = "America/Anchorage",
@@ -35,8 +36,9 @@ class SolarPotential:
             Representative latitude for solar angle calculations.
         longitude : float
             Representative longitude for solar angle calculations.
-        kernel_path : str
-            Path to the azimuth_trace CUDA kernel source file.
+        kernel_path : str, optional
+            Path to the azimuth_trace CUDA kernel source file. If not provided,
+            defaults to the bundled kernel in glare/cuda/azimuth_trace.cu.
         grid_resolution : float
             Grid spacing in meters, used for gradient and zenith calculations.
         step_size : float
@@ -57,7 +59,17 @@ class SolarPotential:
         self.dZdx = dZdx
         self.dZdy = -dZdy
 
-        kernels = cp.RawModule(code=open(kernel_path, "r").read())
+        # Resolve kernel path: use bundled kernel if not provided
+        if kernel_path is None:
+            module_dir = Path(__file__).parent
+            kernel_path = module_dir / "cuda" / "azimuth_trace.cu"
+        else:
+            kernel_path = Path(kernel_path)
+
+        # Load CUDA kernel
+        with open(kernel_path, "r") as f:
+            kernel_code = f.read()
+        kernels = cp.RawModule(code=kernel_code)
         self.kernel = kernels.get_function("azimuth_trace")
         self.block_size = (16, 16)
         self.grid_size = (self.nx // 16 + 1, self.ny // 16 + 1)

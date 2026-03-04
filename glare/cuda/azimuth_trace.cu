@@ -40,7 +40,21 @@ void azimuth_trace(
 
 	if (round_i < 0 || round_i >= ny || round_j < 0 || round_j >= nx) break;
 
-	pixel_elev = dem[round_i*nx + round_j];
+	float fj = current_j;
+        float fi = current_i;
+	int j0 = (int)floorf(fj);
+	int i0 = (int)floorf(fi);
+	int j1 = j0 + 1;
+	int i1 = i0 + 1;
+	if (i0 < 0 || i1 >= ny || j0 < 0 || j1 >= nx) break;
+	float wj = fj - j0;
+	float wi = fi - i0;
+	pixel_elev = (1-wi)*(1-wj)*dem[i0*nx+j0]
+		   + (1-wi)*wj    *dem[i0*nx+j1]
+		   + wi*(1-wj)    *dem[i1*nx+j0]
+		   + wi*wj        *dem[i1*nx+j1];
+
+	//pixel_elev = dem[round_i*nx + round_j];
         zenith = (pixel_elev - base_elev) / pixel_dist;
 	if (zenith > maximum_zenith) { 
 	    maximum_zenith = zenith;
