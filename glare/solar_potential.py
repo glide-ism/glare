@@ -195,13 +195,16 @@ class SolarPotential:
         accumulated /= num_days
         return accumulated
 
-    def compute_monthly_solar_potential(self, year: int) -> cp.ndarray:
+    def compute_monthly_solar_potential(self, year: int, normalized=True) -> cp.ndarray:
         """
         Mean daily solar potential for each pixel for all 12 months.
 
         Parameters
         ----------
         year : int
+        normalized: bool - if True, then returns solar potential in dimensionless 
+                                    scale representing intensity relative to continuous 
+                                    orthogonal sunlight.  
 
         Returns
         -------
@@ -214,6 +217,7 @@ class SolarPotential:
             monthly = cp.zeros(self.z.shape, dtype=cp.float32)
 
             for day in range(1, num_days + 1):
+                print(f"Calculating month {month}, day {day}")
                 for hour in range(24):
                     date = datetime.datetime(
                         year, month, day, hour, 0, 0, tzinfo=self.timezone
@@ -225,6 +229,89 @@ class SolarPotential:
                     incidence = self.compute_incidence(altitude, azimuth)
                     monthly += incidence * shadow_mask
 
-            result[month - 1] = monthly / num_days
+            if normalized:
+                factor = num_days * 24
+            else:
+                factor = 1
+            result[month - 1] = monthly / factor
 
         return result
+
+
+    def compute_hourly_solar_potential(self, year: int, normalized=True) -> cp.ndarray:
+        """
+        Mean daily solar potential for each pixel averaged over each hour for all 12 months.
+
+        Parameters
+        ----------
+        year : int
+        normalized: bool - if True, then returns solar potential in dimensionless 
+                                    scale representing intensity relative to continuous 
+                                    orthogonal sunlight.  
+
+        Returns
+        -------
+        cp.ndarray, shape (12, 24, ny, nx)
+        """
+        result = cp.zeros((12, 24, self.ny, self.nx), dtype=cp.float32)
+
+        for month in range(1, 13):
+            num_days = calendar.monthrange(year, month)[1]
+            hourly = cp.zeros((24,self.ny,self.nx), dtype=cp.float32)
+
+            for day in range(1, num_days + 1):
+                print(f"Calculating month {month}, day {day}")
+                for hour in range(24):
+                    date = datetime.datetime(
+                        year, month, day, hour, 0, 0, tzinfo=self.timezone
+                    )
+                    altitude = get_altitude(self.latitude, self.longitude, date)
+                    azimuth = get_azimuth(self.latitude, self.longitude, date)
+
+                    shadow_mask = self.compute_shadow_mask(altitude, azimuth)
+                    incidence = self.compute_incidence(altitude, azimuth)
+                    hourly[hour] += incidence * shadow_mask
+            
+            if normalized:
+                factor = num_days
+            else:
+                factor = 1
+            result[month - 1] = hourly / factor
+        
+        return result
+
+    def compute_solar_potential_fourier_decomposition(self, year: int, normalized=True) -> cp.ndarray:
+        """
+        Carrying around 12 x 24 fields representing hourly insolation (which we need to 
+        properly modulate melt over diurnal temperature scales) is expensive.  We instead
+        compute the first three pixelwise components of the fourier series averaged over 
+        each month, thus we only store 3 (12,ny,nx) fields instead of 24.  
+        
+        Parameters
+        ----------
+        year : int
+        normalized: bool - if True, then returns solar potential in dimensionless 
+                                    scale representing intensity relative to continuous 
+                                    orthogonal sunlight.  
+
+        Returns
+        -------
+        3 x cp.ndarray, shape (12, ny, nx)
+        """
+        result = self.compute_hourly_solar_potential(year=year,normalized=normalized)
+        ny,nx = result.shape[2],result.shape[3]
+
+        c0 = cp.zeros((12, ny, nx))
+        cc = cp.zeros((12, ny, nx))
+        cs = cp.zeros((12, ny, nx))
+        
+        for h in range(24):
+            slc = result[:, h, :, :]
+            c0 += slc
+            cc += slc * cp.cos(2*np.pi*h/24)
+            cs += slc * cp.sin(2*np.pi*h/24)
+        c0 /= 24
+        cc /= 12  # 2/24
+        cs /= 12
+
+        return c0,cc,cs

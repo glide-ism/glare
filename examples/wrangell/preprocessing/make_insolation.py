@@ -1,10 +1,12 @@
 """
-Compute monthly and daily solar potential for Wrangell ice cap.
+Compute monthly solar potential for Wrangell ice cap.
 
 Uses GLARE's SolarPotential class to compute terrain-corrected insolation
 accounting for slope, aspect, and self-shadowing from the DEM.
+Saves results to NetCDF in the style of make_pancarra_vars.py.
 """
 
+import calendar
 import datetime
 
 import cupy as cp
@@ -12,18 +14,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 from matplotlib.colors import LightSource
+from pysolar.solar import get_altitude, get_azimuth
 
 from glare import SolarPotential
 
 # Configuration
-DEM_PATH = '../data/cop30/cop90_reprojected.nc'
+DEM_PATH = '../data/gridded_dem.nc'
+OUTPUT_PATH = '../data/gridded_insolation.nc'
 GRID_RESOLUTION = 90.0  # meters
 LATITUDE = 61.0
 LONGITUDE = -143.0
 TIMEZONE = "America/Anchorage"
-YEAR = 2023
-MONTH = 4
-NUM_DAYS = 30  # April has 30 days
+YEAR = 2011
 
 # Load DEM
 print(f"Loading DEM from {DEM_PATH}")
@@ -40,63 +42,97 @@ solar = SolarPotential(
     timezone=TIMEZONE,
 )
 
-# Accumulate solar potential over the month
-print(f"Computing daily solar potential for April {YEAR}...")
-accumulated_sunlight_hours = cp.zeros_like(solar.z)
-daily_average_potential = cp.zeros_like(solar.z)
+solar_potential_mean, solar_potential_cos, solar_potential_sin = solar.compute_solar_potential_fourier_decomposition(YEAR)
 
-for day in range(1, NUM_DAYS + 1):
-    daily_sunlight = cp.zeros_like(solar.z)
-    daily_radiation = cp.zeros_like(solar.z)
+solar_potential_mean_da = xr.DataArray(
+    solar_potential_mean.get(),
+    dims=["month","y", "x"],
+    coords={
+        "month": np.arange(0, 12),
+        "y": dem.y,
+        "x": dem.x,
+    },
+    attrs={
+        "units": "dimensionless ( intensity relative to continuous orthogonal sunlight)",
+        "long_name": "Monthly average daily solar potential (incidence-weighted, shadow-masked)",
+    }
+)
 
-    for hour in range(24):
-        date = datetime.datetime(
-            YEAR, MONTH, day, hour, 0, 0,
-            tzinfo=__import__('pytz').timezone(TIMEZONE)
-        )
+solar_potential_cos_da = xr.DataArray(
+    solar_potential_cos.get(),
+    dims=["month","y", "x"],
+    coords={
+        "month": np.arange(0, 12),
+        "y": dem.y,
+        "x": dem.x,
+    },
+    attrs={
+        "units": "dimensionless ( intensity relative to continuous orthogonal sunlight)",
+        "long_name": "cos mode of diurnal variability in insolation",
+    }
+)
+solar_potential_sin_da = xr.DataArray(
+    solar_potential_sin.get(),
+    dims=["month","y", "x"],
+    coords={
+        "month": np.arange(0, 12),
+        "y": dem.y,
+        "x": dem.x,
+    },
+    attrs={
+        "units": "dimensionless ( intensity relative to continuous orthogonal sunlight)",
+        "long_name": "sin mode of diurnal variability in insolation",
+    }
+)
 
-        from pysolar.solar import get_altitude, get_azimuth
-        altitude = get_altitude(LATITUDE, LONGITUDE, date)
-        azimuth = get_azimuth(LATITUDE, LONGITUDE, date)
+#solar_potential = solar.compute_hourly_solar_potential(YEAR)
+#
+#solar_potential_da = xr.DataArray(
+#    solar_potential.get(),
+#    dims=["month","hour","y", "x"],
+#    coords={
+#        "month": np.arange(0, 12),
+#        "hour": np.arange(0, 24),
+#        "y": dem.y,
+#        "x": dem.x,
+#    },
+#    attrs={
+#        "units": "dimensionless ( intensity relative to continuous orthogonal sunlight)",
+#        "long_name": "Monthly average daily solar potential (incidence-weighted, shadow-masked)",
+#    }
+#)
 
-        # Only process if sun is above horizon
-        if altitude > 0:
-            shadow_mask = solar.compute_shadow_mask(altitude, azimuth)
-            incidence = solar.compute_incidence(altitude, azimuth)
+# Create output Dataset by copying DEM and adding new variables
+out_ds = dem.copy()
+out_ds["monthly_solar_potential_mean"] = solar_potential_mean_da
+out_ds["monthly_solar_potential_cos"] = solar_potential_cos_da
+out_ds["monthly_solar_potential_sin"] = solar_potential_sin_da
 
-            daily_sunlight += shadow_mask
-            daily_radiation += incidence * shadow_mask
+# Add global attributes
+out_ds.attrs["source"] = f"GLARE SolarPotential calculator, {YEAR}"
+out_ds.attrs["location"] = f"Wrangell Ice Cap (lat={LATITUDE}, lon={LONGITUDE})"
+out_ds.attrs["grid_resolution"] = f"{GRID_RESOLUTION} m"
 
-    accumulated_sunlight_hours += daily_sunlight
-    daily_average_potential += daily_radiation
-
-# Average over month
-accumulated_sunlight_hours /= NUM_DAYS
-daily_average_potential /= NUM_DAYS
-
-print(f"Mean daily sunlight hours: {accumulated_sunlight_hours.mean().get():.2f}")
-print(f"Mean daily solar potential: {daily_average_potential.mean().get():.4f}")
+# Save to NetCDF
+print(f"\nSaving to {OUTPUT_PATH}...")
+out_ds.to_netcdf(OUTPUT_PATH)
+print(f"✓ Saved {OUTPUT_PATH}")
 
 # Visualization
-print("Creating visualization...")
+print("\nCreating visualization...")
 z_cpu = solar.z.get()
 ls = LightSource(azdeg=315, altdeg=45)
 dx = dem.x[1].item() - dem.x[0].item()  # Convert to float
 hs = ls.hillshade(z_cpu, vert_exag=3, dx=dx, dy=dx)
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+# Plot April (month 3, 0-indexed) for visualization
+april_idx = 3
 
-# Hillshade with solar potential overlay
-axes[0].imshow(hs, cmap=plt.cm.gray)
-im0 = axes[0].imshow(daily_average_potential.get(), alpha=0.5, cmap=plt.cm.plasma)
-axes[0].set_title('Daily Average Solar Potential')
-plt.colorbar(im0, ax=axes[0], label='Incidence-weighted radiation')
-
-# Accumulated sunlight hours
-axes[1].imshow(hs, cmap=plt.cm.gray)
-im1 = axes[1].imshow(accumulated_sunlight_hours.get(), alpha=0.5, cmap=plt.cm.plasma)
-axes[1].set_title('Accumulated Sunlight Hours (April avg/day)')
-plt.colorbar(im1, ax=axes[1], label='Shadow-masked hours/day')
+# Solar potential overlay
+plt.imshow(hs, cmap=plt.cm.gray)
+im1 = plt.imshow(solar_potential_mean[april_idx].get(), alpha=0.5, cmap=plt.cm.plasma)
+plt.title('April: Daily Average Solar Potential')
+plt.colorbar(im1, label='Incidence-weighted (dimensionless)')
 
 plt.tight_layout()
 plt.show()

@@ -43,7 +43,20 @@ valid = da.notnull().values
 y_start, y_end, x_start, x_end = largest_valid_rectangle(valid)
 da_trimmed = da.isel(y=slice(y_start, y_end + 1), x=slice(x_start, x_end + 1))
 
-da_trimmed.to_netcdf('../data/cop30/cop90_reprojected.nc')
+ds_trimmed = da_trimmed.to_dataset()
+
+import shapely
+outline = np.loadtxt('../data/outline/outline.csv',delimiter=',')
+poly = shapely.Polygon(outline[:,:2])
+mask = da_trimmed.rio.clip([poly],crs="EPSG:4326",invert=False,drop=False).notnull()
+ds_trimmed['domain_mask'] = mask
+
+import geopandas
+geodf = geopandas.read_file('../data/outline/rgi_ak/RGI2000-v7.0-C-01_alaska.shp')
+glacier_mask = ds_trimmed.elevation.rio.clip(geodf.geometry.values,geodf.crs,drop=False).notnull()
+ds_trimmed['rgi_mask'] = glacier_mask
+
+ds_trimmed.to_netcdf('../data/gridded_dem.nc')
 
 
 
