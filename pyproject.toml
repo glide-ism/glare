@@ -1,0 +1,52 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "glare"
+version = "0.1.0"
+description = "GPU-accelerated enhanced temperature index surface mass balance model for mountain glaciers and ice caps"
+readme = "README.md"
+license = {text = "BSD-3-Clause"}
+authors = [
+    {name = "Doug Brinkerhoff"}
+]
+requires-python = ">=3.9"
+dependencies = [
+    "cupy>=12.0.0",
+    "numpy>=1.21.0",
+    "xarray>=2022.3.0",
+    "netcdf4>=1.5.0",
+    "pytz>=2021.3",
+    "pysolar>=0.10",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=3.0.0",
+    "black>=22.0.0",
+    "ruff>=0.1.0",
+]
+docs = [
+    "sphinx>=4.5.0",
+    "sphinx-rtd-theme>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/glide-ism/glare"
+Documentation = "https://github.com/glide-ism/glare#readme"
+Repository = "https://github.com/glide-ism/glare.git"
+
+[tool.setuptools]
+packages = ["glare"]
+
+[tool.setuptools.package-data]
+glare = ["cuda/*.cu"]
+
+[tool.black]
+line-length = 100
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"

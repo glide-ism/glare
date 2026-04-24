@@ -88,6 +88,6 @@ class PanCarraBase:
                 [self.interpolate(X_,Y_,time_index=i,key='precip',method=method) for i in range(12)],
                 axis=0)
 
-        return z_oro, t2m_fields, precip_fields
+        return z_oro.astype('float32'), t2m_fields.astype('float32'), precip_fields.astype('float32')
 
 

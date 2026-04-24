@@ -301,9 +301,9 @@ class SolarPotential:
         result = self.compute_hourly_solar_potential(year=year,normalized=normalized)
         ny,nx = result.shape[2],result.shape[3]
 
-        c0 = cp.zeros((12, ny, nx))
-        cc = cp.zeros((12, ny, nx))
-        cs = cp.zeros((12, ny, nx))
+        c0 = cp.zeros((12, ny, nx),dtype=cp.float32)
+        cc = cp.zeros((12, ny, nx),dtype=cp.float32)
+        cs = cp.zeros((12, ny, nx),dtype=cp.float32)
         
         for h in range(24):
             slc = result[:, h, :, :]
