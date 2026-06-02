@@ -7,10 +7,12 @@ from glare.operators import ForwardOperators, BackwardOperators
 @dataclass
 class State:
     smb: TimeField | None = None
+    snow_depth: TimeField | None = None
 
 @dataclass
 class Geometry:
     srf: Field | None = None
+    debris: Field | None = None
 
 @dataclass
 class Precipitation:
@@ -61,6 +63,27 @@ class Insolation:
             units='m a^{-1} per maximum direct solar',
             attrs={'long_name':'melt rate due to direct full sunlight (modulated by albedo)'})
         )
+    albedo_snow: Constant = field(
+        default_factory=lambda: Constant(
+            value=cp.float32(0.8),
+            name='albedo_snow',
+            units='',
+            attrs={'long_name':'broadband albedo of snow-covered surface'})
+        )
+    albedo_ice: Constant = field(
+        default_factory=lambda: Constant(
+            value=cp.float32(0.4),
+            name='albedo_ice',
+            units='',
+            attrs={'long_name':'broadband albedo of ice/bare surface'})
+        )
+    snow_transition_scale: Constant = field(
+        default_factory=lambda: Constant(
+            value=cp.float32(0.1),
+            name='snow_transition_scale',
+            units='m',
+            attrs={'long_name':'snow-depth (water equiv.) scale of the snow/ice albedo sigmoid'})
+        )
 
 class TIMGrid:
 
@@ -69,6 +92,7 @@ class TIMGrid:
             x0: cp.float32=cp.float32(0.0),
             y0: cp.float32=cp.float32(0.0),
             crs=None,
+            start_month: int=9,
             state=None,
             geometry=None,
             precipitation=None,
@@ -83,6 +107,7 @@ class TIMGrid:
         self.x0 = cp.float32(x0)
         self.y0 = cp.float32(y0)
         self.crs = crs
+        self.start_month = int(start_month)   # 9 = October (Jan-indexed)
 
         self.x_cell = cp.arange(x0,x0 + dx*nx, dx)
         self.y_cell = cp.arange(y0,y0 - dx*ny, -dx)
@@ -118,7 +143,16 @@ class TIMGrid:
             name='smb',
             units='m a^{-1}',
             attrs={'long_name':'monthly surface mass balance'})
-        return State(smb=smb)
+        snow_depth = TimeField(
+            data = cp.zeros((self.nt,self.ny,self.nx),dtype=cp.float32),
+            grid_entity=GridEntity.CELL,
+            dx=self.dx,
+            dt=self.dt,
+            grid=self,
+            name='snow_depth',
+            units='m',
+            attrs={'long_name':'end-of-month snow depth (water equivalent)'})
+        return State(smb=smb, snow_depth=snow_depth)
 
     def _allocate_geometry(self):
         srf = Field(
@@ -129,7 +163,16 @@ class TIMGrid:
             name='srf',
             units='m',
             attrs={'long_name':'surface elevation'})
-        return Geometry(srf=srf)
+        debris = Field(
+            data = cp.ones((self.ny,self.nx),dtype=cp.float32),
+            grid_entity=GridEntity.CELL,
+            dx=self.dx,
+            grid=self,
+            name='debris',
+            units='',
+            attrs={'long_name':'debris-cover melt factor for snow-free ice '
+                               '(1 = bare ice, <1 = insulated)'})
+        return Geometry(srf=srf, debris=debris)
 
     def _allocate_precipitation(self):
         precip = TimeField(

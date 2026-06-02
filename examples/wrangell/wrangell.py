@@ -8,9 +8,9 @@ import pyproj
 from glare.model import ImprovedTemperatureIndex
 from glare.torch import GlareStep
 
-dem = xr.load_dataset('data/gridded_dem.nc')
-clm = xr.load_dataset('data/gridded_climate.nc')
-ins = xr.load_dataset('data/gridded_insolation.nc')
+dem = xr.load_dataset('../../../alaska-forecast/domains/wrangell/model_inputs/gridded_dem.nc')
+clm = xr.load_dataset('../../../alaska-forecast/domains/wrangell/model_inputs/gridded_climate.nc')
+ins = xr.load_dataset('../../../alaska-forecast/domains/wrangell/model_inputs/gridded_insolation.nc')
 crs = pyproj.CRS(dem.spatial_ref.crs_wkt)
 
 x           = cp.array(dem.x)
@@ -31,11 +31,20 @@ smb_model.grid.insolation.insol_mean.set(ins.monthly_solar_potential_mean)
 smb_model.grid.insolation.insol_cos.set(ins.monthly_solar_potential_cos)
 smb_model.grid.insolation.insol_sin.set(ins.monthly_solar_potential_sin)
 
-t2m = torch.tensor(clm.monthly_t2m.values,device='cuda',dtype=torch.float32,requires_grad=True)
-precip = torch.tensor(clm.monthly_precip.values,device='cuda',dtype=torch.float32,requires_grad=True)
-mf = torch.tensor(smb_model.grid.temperature.mf.value,device='cuda',dtype=torch.float32,requires_grad=True)
-rf = torch.tensor(smb_model.grid.insolation.rf.value,device='cuda',dtype=torch.float32,requires_grad=True)
+#smb_model.grid.insolation.rf.set(0.0)
+#smb_model.grid.temperature.mf.set(0.0)
 
+smb_model.grid.temperature.t2m.set(clm.monthly_t2m.values)
+smb_model.grid.precipitation.precip.set(clm.monthly_precip.values)
+
+smb_model.grid.forward_operators.compute_forward()
+
+#t2m = torch.tensor(clm.monthly_t2m.values,device='cuda',dtype=torch.float32,requires_grad=True)
+#precip = torch.tensor(clm.monthly_precip.values,device='cuda',dtype=torch.float32,requires_grad=True)
+#mf = torch.tensor(smb_model.grid.temperature.mf.value,device='cuda',dtype=torch.float32,requires_grad=True)
+#rf = torch.tensor(smb_model.grid.insolation.rf.value,device='cuda',dtype=torch.float32,requires_grad=True)
+
+"""
 f_smb = lambda t2m,precip,mf,rf: GlareStep.apply(smb_model,t2m,precip,mf,rf)
 
 delta_t2m = torch.randn_like(t2m)
@@ -72,7 +81,7 @@ L_m = smb_m.sum()
 
 gvp_fd = (L_p - L_m)/(2*eps)
 
-"""
+
 smb_model.grid.temperature.t2m.set(clm.monthly_t2m)
 smb_model.grid.precipitation.precip.set(clm.monthly_precip) 
 

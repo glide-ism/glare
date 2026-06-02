@@ -2,6 +2,7 @@ import pyproj
 import xarray as xr
 import numpy as np
 from scipy.interpolate import RegularGridInterpolator
+from scipy.ndimage import median_filter
 
 class PanCarraBase:
     """ 
@@ -54,7 +55,7 @@ class PanCarraBase:
         transform = pyproj.Transformer.from_proj(proj_from_crs,self.proj,always_xy=True)
         return transform.transform(X,Y)
 
-    def interpolate(self,X,Y,time_index='mean',key='tp',method='linear'):
+    def interpolate(self,X,Y,time_index='mean',key='tp',method='linear',median_filter_precip=3):
         
         if key=='precip':
             dataset = self.precip_dataset['tp']
@@ -69,6 +70,9 @@ class PanCarraBase:
             field = dataset.T.values
         else:
             field = dataset[time_index].T.values
+
+        if key=='precip':
+            field = median_filter(field,median_filter_precip) 
 
         interpolant = RegularGridInterpolator((self.x,self.y),field,method=method)
         return interpolant((X,Y))
