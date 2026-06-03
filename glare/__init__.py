@@ -9,7 +9,6 @@ radiation calculations.
 __version__ = "0.1.0"
 __author__ = "Doug Brinkerhoff"
 
-from .solar_potential import SolarPotential
 from .helpers import PanCarraBase
 
-__all__ = ["SolarPotential","PanCarraBase"]
+__all__ = ["PanCarraBase"]

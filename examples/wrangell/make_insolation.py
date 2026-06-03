@@ -11,7 +11,7 @@ from pathlib import Path
 import geopandas
 import numpy as np
 import xarray as xr
-from glare import SolarPotential
+from gtic import SolarPotential
 
 GRID_RESOLUTION_M = 90.0
 TIMEZONE = "America/Anchorage"
@@ -45,7 +45,7 @@ solar = SolarPotential(
 )
 
 # Compute the first three fourier coefficients for monthly insolation
-mean, cos_mode, sin_mode = solar.compute_solar_potential_fourier_decomposition(YEAR)
+mean, cos_mode, sin_mode = solar.potential_fourier(YEAR)
 
 # Build xarray data arrays
 months = np.arange(0, 12, dtype=np.float32) / 12
