@@ -4,7 +4,7 @@ Uses GLARE's SolarPotential to compute terrain-corrected insolation accounting
 for slope, aspect, and self-shadowing from the DEM, then decomposes the diurnal
 cycle into mean/cos/sin Fourier modes per month.
 
-Output: {domain_path}/model_inputs/gridded_insolation.nc
+Output: ./model_inputs/gridded_insolation.nc
 """
 from pathlib import Path
 
@@ -12,7 +12,6 @@ import geopandas
 import numpy as np
 import xarray as xr
 from glare import SolarPotential
-
 
 GRID_RESOLUTION_M = 90.0
 TIMEZONE = "America/Anchorage"
@@ -36,6 +35,7 @@ output_path = domain_path / 'gridded_insolation.nc'
 dem = xr.load_dataset(dem_path)
 latitude, longitude = _domain_centroid_latlon(domain_path)
 
+# Build Gtic solar potential calculator
 solar = SolarPotential(
     dem=dem,
     latitude=latitude,
@@ -44,8 +44,10 @@ solar = SolarPotential(
     timezone=TIMEZONE,
 )
 
+# Compute the first three fourier coefficients for monthly insolation
 mean, cos_mode, sin_mode = solar.compute_solar_potential_fourier_decomposition(YEAR)
 
+# Build xarray data arrays
 months = np.arange(0, 12, dtype=np.float32) / 12
 coords = {"t": months, "y": dem.y, "x": dem.x}
 dims = ["t", "y", "x"]
@@ -87,4 +89,5 @@ for name in ('elevation', 'domain_mask', 'rgi_mask',
 	 'topography', 'bathymetry', 'bathymetry_mask'):
     del insolation_ds[name]
 
+# Save insolation
 insolation_ds.to_netcdf(output_path)
