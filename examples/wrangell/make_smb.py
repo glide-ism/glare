@@ -10,6 +10,8 @@ from glare.torch import GlareStep
 
 dem = xr.load_dataset('./model_inputs/gridded_dem.nc')
 clm = xr.load_dataset('./model_inputs/gridded_climate.nc')
+
+# Run make_insolation.py before running this.
 ins = xr.load_dataset('./model_inputs/gridded_insolation.nc')
 crs = pyproj.CRS(dem.spatial_ref.crs_wkt)
 
