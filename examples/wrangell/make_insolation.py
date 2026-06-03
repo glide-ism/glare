@@ -6,7 +6,6 @@ cycle into mean/cos/sin Fourier modes per month.
 
 Output: {domain_path}/model_inputs/gridded_insolation.nc
 """
-import argparse
 from pathlib import Path
 
 import geopandas

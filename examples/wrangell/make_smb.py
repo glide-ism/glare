@@ -8,11 +8,19 @@ import pyproj
 from glare.model import ImprovedTemperatureIndex
 from glare.torch import GlareStep
 
-dem = xr.load_dataset('./model_inputs/gridded_dem.nc')
-clm = xr.load_dataset('./model_inputs/gridded_climate.nc')
+from pathlib import Path
 
-# Run make_insolation.py before running this.
-ins = xr.load_dataset('./model_inputs/gridded_insolation.nc')
+domain_path = Path('./model_inputs')
+dem_path = domain_path / 'gridded_dem.nc'
+climate_path = domain_path / 'gridded_climate.nc'
+insolation_path = domain_path / 'gridded_insolation.nc' # Run make_insolation.py before running this.
+
+output_path = domain_path / 'gridded_smb.nc'
+
+dem = xr.load_dataset(dem_path)
+clm = xr.load_dataset(climate_path)
+ins = xr.load_dataset(insolation_path)
+
 crs = pyproj.CRS(dem.spatial_ref.crs_wkt)
 
 x           = cp.array(dem.x)
@@ -38,5 +46,8 @@ smb_model.grid.precipitation.precip.set(clm.monthly_precip.values)
 
 smb_model.grid.forward_operators.compute_forward()
 
+smb_ds = smb_model.grid.state.smb.to_dataarray()
+
+smb_ds.to_netcdf(output_path)
 
 
