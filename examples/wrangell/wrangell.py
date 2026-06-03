@@ -31,8 +31,8 @@ smb_model.grid.insolation.insol_mean.set(ins.monthly_solar_potential_mean)
 smb_model.grid.insolation.insol_cos.set(ins.monthly_solar_potential_cos)
 smb_model.grid.insolation.insol_sin.set(ins.monthly_solar_potential_sin)
 
-#smb_model.grid.insolation.rf.set(0.0)
-#smb_model.grid.temperature.mf.set(0.0)
+smb_model.grid.insolation.rf.set(50.0)
+smb_model.grid.temperature.mf.set(1.5)
 
 smb_model.grid.temperature.t2m.set(clm.monthly_t2m.values)
 smb_model.grid.precipitation.precip.set(clm.monthly_precip.values)

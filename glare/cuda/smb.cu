@@ -54,7 +54,10 @@ extern "C" __global__ void compute_smb(
         float rc = cc[idx];
         float rs = cs[idx];
 
-        float sig = sigmoidf(d_in / snow_scale);
+        // Snow depth is clamped >= 0 (see compute_smb_grad), so the albedo
+        // driver is a one-sided ramp: tanh(d/scale) = 0 for bare ice (d=0),
+        // -> 1 for deep snow.
+        float sig = tanhf(d_in / snow_scale);
         float alpha = alpha_ice + sig * (alpha_snow - alpha_ice);
         float rf_eff = rf * (1.0f - alpha);
 
@@ -81,9 +84,12 @@ extern "C" __global__ void compute_smb(
 
         float snowfall = (1.0f - Phiz) * pr;
 
+        // smb is the true mass balance rate (may be negative -> ice loss);
+        // snow depth is a separate state clamped at 0 (no negative snowpack).
         smb[idx] = (snowfall - melt_eff);
 
         d_in = d_in + (snowfall - melt_eff) * dt;   // end-of-month snow depth
+        if (d_in < 0.0f) d_in = 0.0f;               // clamp: no negative snow
         snow_depth[idx] = d_in;
     }
 }
@@ -141,7 +147,7 @@ extern "C" __global__ void compute_smb_grad(
             float rc = cc[idx];
             float rs = cs[idx];
 
-            float sig = sigmoidf(d_in / snow_scale);
+            float sig = tanhf(d_in / snow_scale);
             float alpha = alpha_ice + sig * (alpha_snow - alpha_ice);
             float rf_eff = rf * (1.0f - alpha);
 
@@ -164,6 +170,7 @@ extern "C" __global__ void compute_smb_grad(
             float snowfall = (1.0f - Phiz) * pr;
 
             d = d_in + (snowfall - melt * fac) * dt;   // end-of-month depth
+            if (d < 0.0f) d = 0.0f;                    // clamp: no negative snow
         }
     }
 
@@ -183,7 +190,7 @@ extern "C" __global__ void compute_smb_grad(
         float rc = cc[idx];
         float rs = cs[idx];
 
-        float sig = sigmoidf(d_in / snow_scale);
+        float sig = tanhf(d_in / snow_scale);
         float alpha = alpha_ice + sig * (alpha_snow - alpha_ice);
         float rf_eff = rf * (1.0f - alpha);
 
@@ -207,11 +214,19 @@ extern "C" __global__ void compute_smb_grad(
         float melt = mf * pdd + rf_eff * ipot_weighted;
         // Debris factor for the snow-free melt fraction (see compute_smb).
         float fac = sig + (1.0f - sig) * deb;
+        float melt_eff = melt * fac;
+
+        // Snow-depth clamp: the carried adjoint only flows back through the
+        // recurrence when the (unclamped) end-of-month depth was positive.
+        // d_raw = pre-clamp depth; relu'(d_raw) = [d_raw > 0].
+        float snowfall = (1.0f - Phiz) * pr;
+        float d_raw = d_in + (snowfall - melt_eff) * dt;
+        float bar_D_eff = (d_raw > 0.0f) ? bar_D : 0.0f;
 
         // Combined sensitivity of the shared (snowfall - melt_eff) term: it
         // feeds both smb[m] (weight grad_smb) and the snow-depth update
-        // (weight dt*bar_D from downstream months).
-        float g = grad_smb[idx] + dt * bar_D;
+        // (weight dt*bar_D_eff from downstream months, gated by the clamp).
+        float g = grad_smb[idx] + dt * bar_D_eff;
 
         float dacc_dT = -pr * phiz * inv_sigma;
         float dabl_pdd_dT = mf * (Phiz + mu * phiz * inv_sigma - z * phiz);
@@ -227,12 +242,13 @@ extern "C" __global__ void compute_smb_grad(
         grad_debris_acc -= melt * (1.0f - sig) * g;
 
         // Adjoint of the start-of-month snow depth d_in.  d_in enters melt_eff
-        // = fac(d_in)*melt(d_in) two ways via the sigmoid: through the albedo
-        // (rf_eff -> melt) and through fac itself.
-        float dsig_dd = sig * (1.0f - sig) / snow_scale;
+        // = fac(d_in)*melt(d_in) two ways via the tanh ramp: through the albedo
+        // (rf_eff -> melt) and through fac itself.  The +d_in carried through
+        // the depth recurrence is gated by the clamp (bar_D_eff).
+        float dsig_dd = (1.0f - sig * sig) / snow_scale;   // d/dd tanh(d/scale)
         float dmelt_dd = -rf * ipot_weighted * (alpha_snow - alpha_ice) * dsig_dd;
         float dmelt_eff_dd = fac * dmelt_dd + melt * (1.0f - deb) * dsig_dd;
-        float bar_d_in = bar_D + g * (-dmelt_eff_dd);
+        float bar_d_in = bar_D_eff + g * (-dmelt_eff_dd);
 
         bar_D = bar_d_in;   // becomes the carried adjoint for step s-1
                             // (discarded at s == 0: October reset, d_in const)
