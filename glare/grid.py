@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field, fields
 import cupy as cp
 
-from glide.field import Field, TimeField, Constant, GridEntity
+from glare.field import Field, TimeField, Constant, GridEntity
 from glare.operators import ForwardOperators, BackwardOperators
 
 @dataclass
