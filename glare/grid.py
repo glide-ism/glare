@@ -17,6 +17,10 @@ class Geometry:
 @dataclass
 class Precipitation:
     precip: TimeField | None = None
+    # Effective solid precipitation consumed by the SMB kernel: precip after the
+    # snow/rain partition and (optionally) avalanche redistribution.  Its .grad
+    # buffer holds grad_snowfall during the adjoint pass.
+    snowfall: TimeField | None = None
 
 @dataclass
 class Temperature:
@@ -184,7 +188,17 @@ class TIMGrid:
             name='precip',
             units='m a^{-1}',
             attrs={'long_name':'monthly total precipitation'})
-        return Precipitation(precip=precip)
+        snowfall = TimeField(
+            data = cp.zeros((self.nt,self.ny,self.nx),dtype=cp.float32),
+            grid_entity=GridEntity.CELL,
+            dx=self.dx,
+            dt=self.dt,
+            grid=self,
+            name='snowfall',
+            units='m a^{-1}',
+            attrs={'long_name':'effective solid precipitation (partitioned, '
+                               'post-avalanche)'})
+        return Precipitation(precip=precip, snowfall=snowfall)
 
     def _allocate_temperature(self):
         t2m = TimeField(

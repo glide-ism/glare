@@ -10,5 +10,7 @@ __version__ = "0.1.0"
 __author__ = "Doug Brinkerhoff"
 
 from .helpers import PanCarraBase
+from .avalanche import AvalancheOperator, partition_forward, partition_adjoint
 
-__all__ = ["PanCarraBase"]
+__all__ = ["PanCarraBase", "AvalancheOperator",
+           "partition_forward", "partition_adjoint"]

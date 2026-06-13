@@ -14,7 +14,10 @@ import torch
 
 import pyproj
 
+from scipy.ndimage import gaussian_filter
+
 from glare.model import ImprovedTemperatureIndex
+from glare.avalanche import AvalancheOperator
 
 domain_path = Path('./model_inputs')
 dem_path = domain_path / 'gridded_dem.nc'
@@ -45,6 +48,9 @@ smb_model = ImprovedTemperatureIndex(ny=ny,nx=nx,nt=12,
         x0=x[0].item(),y0=y[0].item(),
         crs=crs)
 
+# Surface elevation: drives the avalanche redistribution routing.
+smb_model.grid.geometry.srf.set(gaussian_filter(dem.elevation.values,1))
+
 # Set the fields required for insolation (which works on Fourier modes for compression)
 smb_model.grid.insolation.insol_mean.set(ins.monthly_solar_potential_mean)
 smb_model.grid.insolation.insol_cos.set(ins.monthly_solar_potential_cos)
@@ -58,8 +64,14 @@ smb_model.grid.temperature.mf.set(2.0)
 # Set precipitation from CARRA2 (monthly means)
 smb_model.grid.precipitation.precip.set(clm.monthly_precip.values)
 
-# Compute the surface mass balance
-smb_model.grid.forward_operators.compute_forward()
+# Avalanche redistribution: relocate solid precip off steep, ice-free terrain onto
+# downslope deposition zones before melt is applied.  Set to None to disable.
+smb_model.avalanche = AvalancheOperator(smb_model.grid,
+        s_crit=30.0, w_trans=8.0, p=1.5, K=40)
+
+# Compute the surface mass balance.  model.forward() partitions precip into its
+# solid fraction, applies the avalanche operator, then runs the SMB kernel.
+smb_model.forward()
 
 # Compute to xarray data array
 smb_ds = smb_model.grid.state.smb.to_dataarray()

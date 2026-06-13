@@ -33,7 +33,7 @@ class ForwardOperators:
             self.grid.insolation.insol_cos.data,
             self.grid.insolation.insol_sin.data,
             self.grid.temperature.t2m.data,
-            self.grid.precipitation.precip.data,
+            self.grid.precipitation.snowfall.data,
             self.grid.geometry.debris.data,
             self.grid.temperature.mf.value,
             self.grid.insolation.rf.value,
@@ -81,7 +81,7 @@ class BackwardOperators:
 
         smb_kernel(grid, block, (
             self.grid.temperature.t2m.grad,
-            self.grid.precipitation.precip.grad,
+            self.grid.precipitation.snowfall.grad,
             self.grad_mf_pixel,
             self.grad_rf_pixel,
             self.grid.geometry.debris.grad,
@@ -90,7 +90,7 @@ class BackwardOperators:
             self.grid.insolation.insol_cos.data,
             self.grid.insolation.insol_sin.data,
             self.grid.temperature.t2m.data,
-            self.grid.precipitation.precip.data,
+            self.grid.precipitation.snowfall.data,
             self.grid.geometry.debris.data,
             self.grid.temperature.mf.value,
             self.grid.insolation.rf.value,

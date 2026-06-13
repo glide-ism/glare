@@ -19,7 +19,7 @@ extern "C" __global__ void compute_smb(
     const float* __restrict__ cc,
     const float* __restrict__ cs,
     const float* __restrict__ T_mean,
-    const float* __restrict__ precip,
+    const float* __restrict__ snowfall_in,   // pre-partitioned solid precip (post-avalanche)
     const float* __restrict__ debris,
     float mf, float rf, float delta_T, float sigma_T, float phi0,
     float alpha_snow, float alpha_ice, float snow_scale, float dt,
@@ -49,7 +49,6 @@ extern "C" __global__ void compute_smb(
         if (s == 0) d_in = 0.0f;   // October reset
 
         float mu = T_mean[idx];
-        float pr = precip[idx];
         float r0 = c0[idx];
         float rc = cc[idx];
         float rs = cs[idx];
@@ -82,7 +81,9 @@ extern "C" __global__ void compute_smb(
         float fac = sig + (1.0f - sig) * deb;
         float melt_eff = melt * fac;
 
-        float snowfall = (1.0f - Phiz) * pr;
+        // Snowfall is supplied pre-partitioned and post-avalanche; the snow/rain
+        // split and any redistribution happen upstream of this kernel.
+        float snowfall = snowfall_in[idx];
 
         // smb is the true mass balance rate (may be negative -> ice loss);
         // snow depth is a separate state clamped at 0 (no negative snowpack).
@@ -97,7 +98,7 @@ extern "C" __global__ void compute_smb(
 
 extern "C" __global__ void compute_smb_grad(
     float* __restrict__ grad_T_mean,
-    float* __restrict__ grad_precip,
+    float* __restrict__ grad_snowfall,
     float* __restrict__ grad_mf,
     float* __restrict__ grad_rf,
     float* __restrict__ grad_debris,
@@ -106,7 +107,7 @@ extern "C" __global__ void compute_smb_grad(
     const float* __restrict__ cc,
     const float* __restrict__ cs,
     const float* __restrict__ T_mean,
-    const float* __restrict__ precip,
+    const float* __restrict__ snowfall_in,   // pre-partitioned solid precip (post-avalanche)
     const float* __restrict__ debris,
     float mf, float rf, float delta_T, float sigma_T, float phi0,
     float alpha_snow, float alpha_ice, float snow_scale, float dt,
@@ -142,7 +143,6 @@ extern "C" __global__ void compute_smb_grad(
             d_start[s] = d_in;
 
             float mu = T_mean[idx];
-            float pr = precip[idx];
             float r0 = c0[idx];
             float rc = cc[idx];
             float rs = cs[idx];
@@ -167,7 +167,7 @@ extern "C" __global__ void compute_smb_grad(
 
             float melt = mf * pdd + rf_eff * ipot_weighted;
             float fac = sig + (1.0f - sig) * deb;
-            float snowfall = (1.0f - Phiz) * pr;
+            float snowfall = snowfall_in[idx];
 
             d = d_in + (snowfall - melt * fac) * dt;   // end-of-month depth
             if (d < 0.0f) d = 0.0f;                    // clamp: no negative snow
@@ -185,7 +185,6 @@ extern "C" __global__ void compute_smb_grad(
         float d_in = d_start[s];
 
         float mu = T_mean[idx];
-        float pr = precip[idx];
         float r0 = c0[idx];
         float rc = cc[idx];
         float rs = cs[idx];
@@ -219,7 +218,7 @@ extern "C" __global__ void compute_smb_grad(
         // Snow-depth clamp: the carried adjoint only flows back through the
         // recurrence when the (unclamped) end-of-month depth was positive.
         // d_raw = pre-clamp depth; relu'(d_raw) = [d_raw > 0].
-        float snowfall = (1.0f - Phiz) * pr;
+        float snowfall = snowfall_in[idx];
         float d_raw = d_in + (snowfall - melt_eff) * dt;
         float bar_D_eff = (d_raw > 0.0f) ? bar_D : 0.0f;
 
@@ -228,14 +227,16 @@ extern "C" __global__ void compute_smb_grad(
         // (weight dt*bar_D_eff from downstream months, gated by the clamp).
         float g = grad_smb[idx] + dt * bar_D_eff;
 
-        float dacc_dT = -pr * phiz * inv_sigma;
         float dabl_pdd_dT = mf * (Phiz + mu * phiz * inv_sigma - z * phiz);
         float dabl_ins_dT = rf_eff * dipot_dT;
 
+        // Accumulation no longer depends on T inside this kernel (snowfall is
+        // supplied pre-partitioned); the snow/rain split's T-sensitivity is
+        // applied upstream by the partition adjoint.  Only the melt terms remain.
         // melt_eff = fac * melt: the melt sensitivities scale by fac (debris
         // only attenuates the snow-free part; snowfall is unaffected).
-        grad_T_mean[idx] = (dacc_dT - fac * (dabl_pdd_dT + dabl_ins_dT)) * g;
-        grad_precip[idx] = (1.0f - Phiz) * g;
+        grad_T_mean[idx] = -fac * (dabl_pdd_dT + dabl_ins_dT) * g;
+        grad_snowfall[idx] = g;
         grad_mf_acc -= fac * pdd * g;
         grad_rf_acc -= fac * (1.0f - alpha) * ipot_weighted * g;
         // d melt_eff / d debris = melt * d fac / d debris = melt*(1 - sig).
