@@ -301,20 +301,19 @@ class TimeField(Field):
             attrs["crs_wkt"] = g.crs.to_wkt()
 
         # Rich coordinate mode: use grid-provided coordinates
-        
-            dims = ("t","y_cell", "x_cell")
-            if g is not None:   
-                coords = {
-                    "t": np.linspace(0,1,13)[:-1],
-                    "x_cell": _coord("x_cell",_to_numpy(g.x_cell)),
-                    "y_cell": _coord("y_cell",_to_numpy(g.y_cell)),
-                }
-            else:
-                coords = {
-                    "t": np.linspace(0,1,13)[:-1],
-                    "x_cell": _coord("x_cell",np.arange( self.dx/2, self.dx/2 + data.shape[1]*self.dx, self.dx)),
-                    "y_cell": _coord("y_cell",np.arange(-self.dx/2,-self.dx/2 - data.shape[0]*self.dx,-self.dx)),
-                }
+        dims = ("t","y_cell", "x_cell")
+        if g is not None:
+            coords = {
+                "t": np.linspace(0,1,13)[:-1],
+                "x_cell": _coord("x_cell",_to_numpy(g.x_cell)),
+                "y_cell": _coord("y_cell",_to_numpy(g.y_cell)),
+            }
+        else:
+            coords = {
+                "t": np.linspace(0,1,13)[:-1],
+                "x_cell": _coord("x_cell",np.arange( self.dx/2, self.dx/2 + data.shape[1]*self.dx, self.dx)),
+                "y_cell": _coord("y_cell",np.arange(-self.dx/2,-self.dx/2 - data.shape[0]*self.dx,-self.dx)),
+            }
 
         return xr.DataArray(
             data=data,

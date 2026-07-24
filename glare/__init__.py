@@ -11,6 +11,12 @@ __author__ = "Doug Brinkerhoff"
 
 from .helpers import PanCarraBase
 from .avalanche import AvalancheOperator, partition_forward, partition_adjoint
+from .enthalpy import (EnthalpyModel, Parameters, State, Fluxes, step,
+                       run_column, run_column_adjoint, generate_temp_deviations,
+                       Gradients)
 
 __all__ = ["PanCarraBase", "AvalancheOperator",
-           "partition_forward", "partition_adjoint"]
+           "partition_forward", "partition_adjoint",
+           "EnthalpyModel", "Parameters", "State", "Fluxes", "step",
+           "run_column", "run_column_adjoint", "generate_temp_deviations",
+           "Gradients"]
