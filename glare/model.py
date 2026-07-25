@@ -48,7 +48,7 @@ class ImprovedTemperatureIndex:
 
         self.grid.forward_operators.compute_forward()
 
-    def backward(self,dJdsmb=None):
+    def adjoint(self,dJdsmb=None):
         if dJdsmb is not None:
             self.grid.backward_operators.grad_smb[:,:,:] = dJdsmb
         else:
