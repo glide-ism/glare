@@ -30,7 +30,7 @@ class ImprovedTemperatureIndex:
     def _sigma(self):
         return self.grid.temperature.sigma_t2m.value
 
-    def forward(self):
+    def _prepare_effective_inputs(self):
         # Partition total precip into its solid fraction, then (optionally)
         # redistribute it downslope, before the SMB kernel sees it.  This happens
         # once per forcing update, not per timestep.
@@ -46,9 +46,17 @@ class ImprovedTemperatureIndex:
         else:
             snowfall[...] = self._snowfall_raw
 
+    def forward(self):
+        self._prepare_effective_inputs()
         self.grid.forward_operators.compute_forward()
 
     def adjoint(self,dJdsmb=None):
+        # Re-derive the effective solid precip from the *currently-set* raw
+        # inputs before the kernel adjoint replays against it.  Callers may have
+        # re-set t2m/precip since the last forward filled `snowfall` — e.g.
+        # several GlareStep autograd nodes sharing one model inside a single
+        # checkpoint segment, each backward re-setting its own saved inputs.
+        self._prepare_effective_inputs()
         if dJdsmb is not None:
             self.grid.backward_operators.grad_smb[:,:,:] = dJdsmb
         else:

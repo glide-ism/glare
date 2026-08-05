@@ -1,0 +1,22 @@
+# Development dependencies. Includes core requirements plus the optional
+# torch bridge (glare/torch.py), example scripts, test, lint, and docs tooling.
+# Mirrors the [torch], [examples], [dev], and [docs] extras in pyproject.toml.
+-r requirements.txt
+
+# PyTorch autograd bridge (glare/torch.py) and example scripts.
+# gtic provides SolarPotential, used by examples/wrangell/make_insolation.py to
+# generate the static insolation input field consumed by glare.
+torch>=2.0.0
+matplotlib>=3.5.0
+geopandas>=0.12.0
+gtic
+
+# Test and lint
+pytest>=7.0.0
+pytest-cov>=3.0.0
+black>=22.0.0
+ruff>=0.1.0
+
+# Docs
+sphinx>=4.5.0
+sphinx-rtd-theme>=1.0.0

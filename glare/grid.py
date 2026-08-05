@@ -119,6 +119,10 @@ class EnthalpyGeometry:
     # Static per-cell basal/substrate temperature forcing; its .grad is an adjoint
     # target (mirrors how ETIM's debris field carries a gradient).
     t_base: Field | None = None
+    # Debris melt attenuation for snow-free ice (1 = clean, 0 = fully insulated):
+    # multiplies every glacier-ice melt flux in the kernel.  Static per-cell,
+    # adjoint target like t_base; initialized to 1 so unset grids are clean ice.
+    debris: Field | None = None
     # Surface elevation: the routing DEM read by the AvalancheOperator (only used
     # when an avalanche operator is attached to the model).
     srf: Field | None = None
@@ -343,9 +347,16 @@ class TIMGrid(Grid):
 # =========================================================================== #
 class EnthalpyGrid(Grid):
 
+    # State fields that are pure outputs of the forward kernel and are never
+    # read back by the model (only `smb` leaves via the torch layer; the
+    # adjoint replays from the inputs). With materialize_state=False these
+    # share a single scratch cube instead of one (nt, ny, nx) buffer each.
+    DIAGNOSTIC_STATE = ("M", "E", "runoff", "ice_melt", "t_surface", "albedo")
+
     def __init__(self, ny, nx, nt, dx, dt,
                  x0=cp.float32(0.0), y0=cp.float32(0.0), crs=None, start_month=9,
                  n_substeps=1, glacier_surface=True, use_fast_math=True,
+                 materialize_state=True,
                  state=None, geometry=None, precipitation=None,
                  temperature=None, thermodynamics=None, radiation=None):
         super().__init__(ny, nx, nt, dx, dt,
@@ -354,6 +365,12 @@ class EnthalpyGrid(Grid):
         self.n_substeps = int(n_substeps)
         self.glacier_surface = bool(glacier_surface)
         self.use_fast_math = bool(use_fast_math)
+        # materialize_state=False aliases the six diagnostic state fields onto
+        # one shared scratch cube (their contents are then interleaved garbage
+        # — check `field.is_materialized` before reading). Toggle at runtime
+        # with materialize_state_fields()/dematerialize_state_fields(); the
+        # next forward() fills freshly materialized buffers.
+        self.materialize_state = bool(materialize_state)
 
         self.state = state if state is not None else self._allocate_state()
         self.geometry = geometry if geometry is not None else self._allocate_geometry()
@@ -372,21 +389,83 @@ class EnthalpyGrid(Grid):
     def _make_backward_operators(self):
         return EnthalpyBackwardOperators(self)
 
+    _STATE_META = {
+        "M": ('kg m^{-2}', 'active surface-reservoir mass'),
+        "E": ('J m^{-2}', 'active surface-reservoir enthalpy (ref. ice at 0 C)'),
+        "runoff": ('kg m^{-2}', 'meltwater/rain runoff from the pack this month'),
+        "ice_melt": ('kg m^{-2}', 'glacier-ice melt this month'),
+        "t_surface": ('C', 'reservoir/surface temperature'),
+        "albedo": ('', 'broadband surface albedo'),
+    }
+
     def _allocate_state(self):
-        f = self._timefield
-        return EnthalpyState(
-            smb=f('smb', 'm a^{-1}', 'monthly surface mass balance (water equivalent)'),
-            M=f('M', 'kg m^{-2}', 'active surface-reservoir mass'),
-            E=f('E', 'J m^{-2}', 'active surface-reservoir enthalpy (ref. ice at 0 C)'),
-            runoff=f('runoff', 'kg m^{-2}', 'meltwater/rain runoff from the pack this month'),
-            ice_melt=f('ice_melt', 'kg m^{-2}', 'glacier-ice melt this month'),
-            t_surface=f('t_surface', 'C', 'reservoir/surface temperature'),
-            albedo=f('albedo', '', 'broadband surface albedo'))
+        smb = self._timefield(
+            'smb', 'm a^{-1}', 'monthly surface mass balance (water equivalent)')
+        smb.is_materialized = True
+        if self.materialize_state:
+            diag = {name: self._timefield(name, units, long_name)
+                    for name, (units, long_name) in self._STATE_META.items()}
+            for field in diag.values():
+                field.is_materialized = True
+            self._state_scratch = None
+        else:
+            # One shared scratch cube stands in for all six diagnostic
+            # outputs (kernel write-only targets; their contents interleave
+            # to garbage). materialize_state_fields() gives them real
+            # buffers on demand.
+            scratch = cp.zeros((self.nt, self.ny, self.nx), dtype=cp.float32)
+            diag = {}
+            for name, (units, long_name) in self._STATE_META.items():
+                field = TimeField(
+                    data=scratch, grid_entity=GridEntity.CELL, dx=self.dx,
+                    dt=self.dt, grid=self, name=name, units=units,
+                    attrs={'long_name': long_name})
+                field.is_materialized = False
+                diag[name] = field
+            self._state_scratch = scratch
+        return EnthalpyState(smb=smb, **diag)
+
+    def materialize_state_fields(self):
+        """Give each diagnostic state field (M, E, runoff, ice_melt,
+        t_surface, albedo) its own (nt, ny, nx) buffer again. The buffers are
+        zero until the NEXT forward() fills them — run one forward before
+        reading. No-op when already materialized."""
+        if self.materialize_state:
+            return
+        for name in self.DIAGNOSTIC_STATE:
+            field = getattr(self.state, name)
+            field.data = cp.zeros((self.nt, self.ny, self.nx),
+                                  dtype=cp.float32)
+            field.is_materialized = True
+        self._state_scratch = None
+        self.materialize_state = True
+
+    def dematerialize_state_fields(self):
+        """Point the six diagnostic state fields at ONE shared scratch cube,
+        freeing five (nt, ny, nx) buffers. Their contents become interleaved
+        kernel-output garbage (`is_materialized` is False); `smb` keeps its
+        own buffer and is unaffected. Safe because the kernels only ever
+        WRITE these outputs — nothing reads them back. No-op when already
+        dematerialized."""
+        if not self.materialize_state:
+            return
+        scratch = cp.zeros((self.nt, self.ny, self.nx), dtype=cp.float32)
+        for name in self.DIAGNOSTIC_STATE:
+            field = getattr(self.state, name)
+            field.data = scratch
+            field.is_materialized = False
+        self._state_scratch = scratch
+        self.materialize_state = False
 
     def _allocate_geometry(self):
-        return EnthalpyGeometry(
+        geometry = EnthalpyGeometry(
             t_base=self._field('t_base', 'C', 'basal/substrate temperature'),
+            debris=self._field('debris', '',
+                               'debris melt attenuation for snow-free ice '
+                               '(1 = clean)'),
             srf=self._field('srf', 'm', 'surface elevation'))
+        geometry.debris.data[...] = 1.0   # default: clean ice, no attenuation
+        return geometry
 
     def _allocate_precipitation(self):
         return EnthalpyPrecipitation(
