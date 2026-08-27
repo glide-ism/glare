@@ -422,7 +422,7 @@ def test_substep_matches_step():
 # --------------------------------------------------------------------------- #
 # Adjoint correctness: the hand-derived scalar VJP (run_column_adjoint) matches
 # central finite differences of run_column for every differentiation target --
-# forcing (t2m, precip, insol, t_base) and all seven parameters -- with sub-steps.
+# forcing (t2m, precip, insol, t_base) and all eight parameters -- with sub-steps.
 # This is the ground-truth check; the kernel is then pinned to this reference.
 # --------------------------------------------------------------------------- #
 def test_run_column_adjoint_finite_difference():
@@ -446,6 +446,9 @@ def test_run_column_adjoint_finite_difference():
         seeds["grad_M"] *= 1e-2      # keep the loss well-conditioned across outputs
         seeds["grad_E"] *= 1e-8      # (M ~ 1e2 kg m-2, E ~ 1e7 J m-2)
         debris = float(r.uniform(0.1, 1.0))  # drawn last: earlier draws unchanged
+        # q_lw0 drawn after debris (same rule); non-zero so the relative FD step
+        # in the parameter loop below is well scaled.
+        p.q_lw0 = float(r.uniform(-60.0, -5.0)) * SECONDS_PER_YEAR
         return precip, t2m, insol, t_base, debris, dev, p, seeds
 
     def loss(precip, t2m, insol, t_base, debris, dev, p, seeds):
@@ -601,6 +604,7 @@ def test_adjoint_gradient_check_end_to_end():
     g.temperature.t2m.set(cp.asarray(t2m))
     g.radiation.insol_mean.set(cp.asarray(insol))
     g.radiation.q_sw_insol.set(200.0 * SECONDS_PER_YEAR)
+    g.radiation.q_lw0.set(-30.0 * SECONDS_PER_YEAR)
     g.geometry.t_base.set(cp.asarray(t_base))
     enth = EnthalpyModel(g)
 
@@ -615,6 +619,7 @@ def test_adjoint_gradient_check_end_to_end():
     enth.adjoint(grad_smb=cp.asarray(w))
     g_t2m = cp.asnumpy(g.temperature.t2m.grad)
     g_H_atm = g.thermodynamics.H_atm.grad
+    g_q_lw0 = g.radiation.q_lw0.grad
 
     # Central difference w.r.t. a handful of t2m cells.
     base_t2m = g.temperature.t2m.data.copy()
@@ -636,6 +641,15 @@ def test_adjoint_gradient_check_end_to_end():
     g.thermodynamics.H_atm.set(base_H)
     num = (Lp - Lm) / (2 * h)
     assert abs(g_H_atm - num) <= 2e-2 * (1.0 + abs(num))
+
+    # The constant offset: absolute step (its natural scale is W m-2, not relative).
+    base_q = float(g.radiation.q_lw0.value)
+    h = 5.0 * SECONDS_PER_YEAR
+    g.radiation.q_lw0.set(base_q + h); Lp = loss()
+    g.radiation.q_lw0.set(base_q - h); Lm = loss()
+    g.radiation.q_lw0.set(base_q)
+    num = (Lp - Lm) / (2 * h)
+    assert abs(g_q_lw0 - num) <= 2e-2 * (1.0 + abs(num))
 
 
 # --------------------------------------------------------------------------- #

@@ -35,8 +35,14 @@ One forcing step (`step` in `glare/enthalpy.py`):
    `q_sw_insol` (the clear-sky flux at full direct sun) by the monthly-mean
    insolation fraction `I` (`grid.insolation.insol_mean`) — the terrain-shaded,
    sun-angle-modulated shortwave. `q_sw_insol = 0` recovers a constant bulk model.
-3. **Linear exchange.** `q = q_sw + H_atm(T_air − T_s) + H_base(T_base − T_s)`,
-   with a snow-insulation reduction of `H_base`.
+3. **Linear exchange.** `q = q_sw + q_lw0 + H_atm(T_air − T_s) + H_base(T_base − T_s)`,
+   with a snow-insulation reduction of `H_base`. `q_lw0` is a constant flux into the
+   surface that is neither albedo-scaled nor proportional to the temperature
+   difference — the offset part of net longwave / latent exchange (the clear-sky
+   longwave deficit `−(1−ε_a)σT⁴`, evaporation into sub-saturated air; negative
+   cools). Without it a calibrated `H_atm` has to absorb the offset and comes out
+   too small, which flattens the melt–temperature sensitivity. `q_lw0 = 0`
+   reproduces the original balance.
 4. **Implicit projection.** The cold branch (`T_s ≤ 0`) is solved by **backward
    Euler**. If the implicit solution crosses 0 °C, `T_s` is pinned to 0 °C and the
    surplus energy becomes runoff then ice melt. A bare surface (`M ≈ 0`) is treated
@@ -145,8 +151,8 @@ sub-step is recomputed forward (capturing its branch selectors) and transposed, 
 the adjoint resolves sub-monthly variance exactly as the forward does.
 
 **Targets.** Gradients are produced for the forcing (`t2m`, `precip`, `insol`,
-`t_base`) and the seven energy-balance parameters (`H_atm`, `H_base0`, `q_sw_bulk`,
-`q_sw_insol`, `albedo_snow`, `albedo_ice`, `M_albedo`) — the invertible set from the
+`t_base`) and the eight energy-balance parameters (`H_atm`, `H_base0`, `q_sw_bulk`,
+`q_sw_insol`, `q_lw0`, `albedo_snow`, `albedo_ice`, `M_albedo`) — the invertible set from the
 synopsis. The thermodynamic constants (`L_f`, `c_i`, `c_w`, `T_transition`,
 `M_insulation`, `rho_w`) are held fixed. The loss is seeded through the mass/energy
 outputs (`smb`, `M`, `E`, `runoff`, `ice_melt`); the pure diagnostics (`t_surface`,
@@ -161,7 +167,7 @@ gradients) that is the VJP of record and the finite-difference oracle, and the C
 kernel (`cuda/enthalpy.cu::compute_enthalpy_grad`, driven by `EnthalpyModel.adjoint`
 via `EnthalpyBackwardOperators`). Like ETIM's adjoint, the GPU pass **writes
 gradients directly into the grid**: the forcing into `Field.grad` (`t2m`, `precip`,
-`insol_mean`, `t_base`) and the seven parameters into their `Constant.grad` (per-pixel
+`insol_mean`, `t_base`) and the eight parameters into their `Constant.grad` (per-pixel
 on the GPU, reduced to scalars on the host — the `grad_mf`/`grad_rf` convention). The
 reverse pass linearises about the most recent `forward()` and reuses `grid.temp_dev`.
 
@@ -189,7 +195,8 @@ reverse pass linearises about the most recent `forward()` and reuses `grid.temp_
   in the grid `.grad` buffers — forcing fields column-by-column and the reduced
   parameter `Constant.grad`s as the summed reference — at `n_substeps` 1 and 6; plus
   an end-to-end check that `EnthalpyModel.adjoint` agrees with finite differences of
-  the GPU forward.
+  the GPU forward (including the constant-offset `q_lw0`, perturbed with an absolute
+  step about a non-zero base).
 - **Symmetry:** the enthalpy driver exposes the same surface as the ETIM driver
   (`grid.state.smb`, `forward()`, `adjoint()` populating grid `.grad`), and both
   grids subclass the agnostic base `Grid`.
@@ -209,7 +216,7 @@ reverse pass linearises about the most recent `forward()` and reuses `grid.temp_
 - **Spatially-correlated / per-pixel noise** — the deviation vector is domain-wide
   uniform in v1 (see "Sub-monthly stochastic temperature").
 - **Thermodynamic-constant gradients** — the adjoint fixes `L_f`, `c_i`, `c_w`,
-  `T_transition`, `M_insulation`, `rho_w`; only the seven energy-balance parameters
+  `T_transition`, `M_insulation`, `rho_w`; only the eight energy-balance parameters
   and the forcing carry a gradient (see "Differentiability").
 - **Diagnostic-output seeds** — the adjoint seeds only the mass/energy outputs; a
   loss on `t_surface`/`albedo` is not differentiated (they feed no state).

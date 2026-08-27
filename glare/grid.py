@@ -101,7 +101,7 @@ class Insolation:
 # =========================================================================== #
 # Field groups for the snowpack-enthalpy core.  Its parameters live here as grid
 # Constants (the single source of truth), exactly as the ETIM parameters do above;
-# the seven invertible ones (see glare.operators.GRAD_PARAM_NAMES) get their .grad
+# the eight invertible ones (see glare.operators.GRAD_PARAM_NAMES) get their .grad
 # populated by the adjoint.
 # =========================================================================== #
 @dataclass
@@ -202,6 +202,14 @@ class Radiation:
         default_factory=lambda: Constant(
             value=cp.float32(0.0), name='q_sw_insol', units='J m^{-2} yr^{-1}',
             attrs={'long_name':'seasonal shortwave flux at full direct sun (x insolation)'}))
+    # Constant flux into the surface that is NOT albedo-scaled and NOT proportional
+    # to (T_air - T_s): the dT-independent part of net longwave / latent exchange
+    # (clear-sky longwave deficit, evaporation into sub-saturated air).  Negative
+    # cools.  Zero reproduces the original balance exactly.
+    q_lw0: Constant = field(
+        default_factory=lambda: Constant(
+            value=cp.float32(0.0), name='q_lw0', units='J m^{-2} yr^{-1}',
+            attrs={'long_name':'constant non-albedo-scaled surface flux (longwave/latent offset; <0 cools)'}))
     albedo_snow: Constant = field(
         default_factory=lambda: Constant(
             value=cp.float32(0.9), name='albedo_snow', units='',

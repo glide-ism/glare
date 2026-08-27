@@ -47,7 +47,7 @@ def _t(a, requires_grad=True):
 
 # --------------------------------------------------------------------------- #
 # EnthalpyStep: forward returns smb; backward populates a gradient on each of the
-# twelve differentiable inputs (incl. the optional debris field), and every
+# thirteen differentiable inputs (incl. the optional debris field), and every
 # gradient matches a direct model.forward()/model.adjoint() (the autograd wiring
 # adds nothing but bookkeeping).
 # --------------------------------------------------------------------------- #
@@ -72,12 +72,13 @@ def _enthalpy_step_case(with_avalanche):
     H_base0 = _t(0.6 * SECONDS_PER_YEAR)
     q_sw_bulk = _t(100.0 * SECONDS_PER_YEAR)
     q_sw_insol = _t(200.0 * SECONDS_PER_YEAR)
+    q_lw0 = _t(-30.0 * SECONDS_PER_YEAR)
     a_snow = _t(0.9)
     a_ice = _t(0.4)
     M_alb = _t(20.0)
     debris = _t(rng.uniform(0.2, 1.0, (ny, nx)))
     inputs = [t2m, precip, insol, t_base, H_atm, H_base0, q_sw_bulk, q_sw_insol,
-              a_snow, a_ice, M_alb, debris]
+              q_lw0, a_snow, a_ice, M_alb, debris]
 
     smb = EnthalpyStep.apply(enth, *inputs)
     assert smb.shape == (nt, ny, nx) and smb.device.type == "cuda"
@@ -108,6 +109,7 @@ def _enthalpy_step_case(with_avalanche):
                         (H_base0, g.thermodynamics.H_base0),
                         (q_sw_bulk, g.radiation.q_sw_bulk),
                         (q_sw_insol, g.radiation.q_sw_insol),
+                        (q_lw0, g.radiation.q_lw0),
                         (a_snow, g.radiation.albedo_snow),
                         (a_ice, g.radiation.albedo_ice),
                         (M_alb, g.radiation.M_albedo)):
@@ -229,7 +231,7 @@ def test_avalanche_step():
 
 @_maybe_skip
 def test_enthalpy_step_optional_args():
-    # Debris and temp_deviations are trailing optional args: the legacy 11-input
+    # Debris and temp_deviations are trailing optional args: the 12-input
     # call still works (debris -> clean ice), and omitting debris after a debris
     # call must reset the grid field rather than reuse the stale one.
     rng = np.random.default_rng(1)
@@ -242,6 +244,7 @@ def test_enthalpy_step_optional_args():
             _t(rng.uniform(-12.0, -2.0, (ny, nx)), False),
             _t(1.0 * SECONDS_PER_YEAR, False), _t(0.6 * SECONDS_PER_YEAR, False),
             _t(100.0 * SECONDS_PER_YEAR, False), _t(200.0 * SECONDS_PER_YEAR, False),
+            _t(0.0, False),
             _t(0.9, False), _t(0.4, False), _t(20.0, False)]
     with torch.no_grad():
         clean = EnthalpyStep.apply(enth, *args)                       # legacy form

@@ -41,7 +41,7 @@ The model is reverse-mode differentiable: :func:`run_column_adjoint` (scalar) an
 -- a checkpointed replay then a reverse-in-time scan carrying the state adjoints, as
 in ``compute_smb_grad``.  Like ETIM, the adjoint writes gradients directly into the
 grid's ``Field.grad`` / ``Constant.grad`` buffers: the forcing (``t2m``, ``precip``,
-``insol_mean``, ``t_base``) and the seven energy-balance parameters in
+``insol_mean``, ``t_base``) and the eight energy-balance parameters in
 :data:`~glare.operators.GRAD_PARAM_NAMES`.  Burial of the active reservoir into ice
 (``M_active_max``) is not applied in v1, matching the reference ``step``.
 """
@@ -96,6 +96,7 @@ def scalar_params(grid) -> SimpleNamespace:
         L_f=float(th.L_f.value), c_i=float(th.c_i.value), c_w=float(th.c_w.value),
         H_atm=float(th.H_atm.value), H_base0=float(th.H_base0.value),
         q_sw_bulk=float(rad.q_sw_bulk.value), q_sw_insol=float(rad.q_sw_insol.value),
+        q_lw0=float(rad.q_lw0.value),
         albedo_snow=float(rad.albedo_snow.value), albedo_ice=float(rad.albedo_ice.value),
         M_albedo=float(rad.M_albedo.value),
         T_transition=float(tm.T_transition.value),
@@ -155,8 +156,11 @@ def step(
     """Advance one forcing interval.
 
     The atmospheric and basal terms are
-        ``q = q_sw + H_atm (T_air - T_s) + H_base (T_base - T_s)``,
-    with ``T_s <= 0`` degC.  The cold branch is solved by backward Euler.  If the
+        ``q = q_sw + q_lw0 + H_atm (T_air - T_s) + H_base (T_base - T_s)``,
+    with ``T_s <= 0`` degC.  ``q_lw0`` is a constant flux into the surface that is
+    neither albedo-scaled nor proportional to the temperature difference -- the
+    offset part of net longwave / latent exchange (clear-sky longwave deficit,
+    evaporation into sub-saturated air); negative cools.  The cold branch is solved by backward Euler.  If the
     implicit cold solution crosses 0 degC, the surface is held at 0 degC and
     positive energy is converted to runoff and, after snow exhaustion, ice melt.
 
@@ -189,7 +193,7 @@ def step(
 
     H_base = basal_conductance(M_solid, p)
     H_total = p.H_atm + H_base
-    Q0 = q_sw + p.H_atm * T_air + H_base * T_base
+    Q0 = q_sw + p.q_lw0 + p.H_atm * T_air + H_base * T_base
     flux.albedo = alpha
 
     if M > p.M_eps:
@@ -199,7 +203,7 @@ def step(
         if E_cold <= 0.0:
             E = E_cold
             T_surface = E / (M * p.c_i)
-            q_nonadvective = q_sw + p.H_atm * (T_air - T_surface) \
+            q_nonadvective = q_sw + p.q_lw0 + p.H_atm * (T_air - T_surface) \
                               + H_base * (T_base - T_surface)
         else:
             # Melting branch: T_s = 0 degC.
@@ -350,7 +354,7 @@ def run_column(
 # kept in lock-step exactly as `run_column` mirrors the forward kernel.
 #
 # Differentiation targets: the forcing (t2m, precip, insol, t_base), the static
-# debris attenuation field, and the seven energy-balance parameters in
+# debris attenuation field, and the eight energy-balance parameters in
 # GRAD_PARAM_NAMES.  The thermodynamic constants (L_f, c_i, c_w, T_transition,
 # M_insulation, rho_w) are held fixed.  The loss is seeded through the
 # mass/energy outputs (smb, M, E, runoff, ice_melt); the pure diagnostics
@@ -391,7 +395,7 @@ def _substep_forward(M_in, E_in, P, T_air, T_base, insol, dt, p, glacier,
     denomH = 1.0 + Msol * invMins
     Hb = p.H_base0 / denomH
     Htot = p.H_atm + Hb
-    Q0 = q_sw + p.H_atm * T_air + Hb * T_base
+    Q0 = q_sw + p.q_lw0 + p.H_atm * T_air + Hb * T_base
 
     runoff = 0.0
     ice_melt = 0.0
@@ -448,7 +452,7 @@ def _substep_backward(im, bar_M2, bar_E2, g_runoff, g_icemelt, dt, p, glacier):
     Consumes the adjoints of this sub-step's outputs -- ``bar_M2``/``bar_E2`` of the
     carried state and ``g_runoff``/``g_icemelt`` of the two flux outputs -- and
     returns ``(bar_M_in, bar_E_in, g)``: the adjoints of the input state and a dict
-    of gradient contributions for the forcing and the seven parameters.
+    of gradient contributions for the forcing and the eight parameters.
     """
     # Cleanup clamp (transpose): kill the state-output adjoints when the reservoir
     # collapsed to a clean bare state (gate closed).
@@ -505,8 +509,9 @@ def _substep_backward(im, bar_M2, bar_E2, g_runoff, g_icemelt, dt, p, glacier):
     g["t_base"] = 0.0
     g["debris"] = g_debris
 
-    # Q0 = q_sw + H_atm T_air + Hb T_base
+    # Q0 = q_sw + q_lw0 + H_atm T_air + Hb T_base
     bar_qsw = bar_Q0
+    g["q_lw0"] += bar_Q0
     g["H_atm"] += bar_Q0 * im["T_air"]
     bar_T_air = bar_Q0 * p.H_atm
     bar_Hb = bar_Q0 * im["T_base"]
@@ -570,7 +575,7 @@ def run_column_adjoint(
     seeded output field (``(nt,)`` each, calendar-month order; ``None`` -> zeros).
     Returns a plain **dict** of gradients: ``t2m``/``precip``/``insol`` as ``(nt,)``
     arrays, ``t_base`` and ``debris`` scalars (static per-column fields), and the
-    seven parameter gradients (summed over the year) keyed by name -- the CPU
+    eight parameter gradients (summed over the year) keyed by name -- the CPU
     counterpart of the grid ``.grad`` buffers the GPU ``EnthalpyModel.adjoint``
     populates.
 
@@ -800,7 +805,7 @@ class EnthalpyModel:
         forcing gradients into ``grid.temperature.t2m.grad``,
         ``grid.precipitation.precip.grad``, ``grid.radiation.insol_mean.grad``,
         ``grid.geometry.t_base.grad`` and ``grid.geometry.debris.grad``, and the
-        seven energy-balance parameter gradients into the corresponding
+        eight energy-balance parameter gradients into the corresponding
         ``Constant.grad`` scalars (summed over the grid -- the loss is scalar).
         Returns ``None``.
 
