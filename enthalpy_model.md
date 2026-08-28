@@ -31,10 +31,13 @@ One forcing step (`step` in `glare/enthalpy.py`):
    supercooled rain.
 2. **Albedo** from the *diagnostic solid mass* (liquid drained for the optics)
    via a snow-cover sigmoid → absorbed shortwave
-   `q_sw = (1 − α)·(q_sw_bulk + q_sw_insol·I)`. The seasonal term scales
-   `q_sw_insol` (the clear-sky flux at full direct sun) by the monthly-mean
-   insolation fraction `I` (`grid.insolation.insol_mean`) — the terrain-shaded,
-   sun-angle-modulated shortwave. `q_sw_insol = 0` recovers a constant bulk model.
+   `q_sw = (1 − α)·(q_sw_bulk + q_sw_insol·I + q_sw_dif·I_dif)`. The direct term
+   scales `q_sw_insol` (the clear-sky flux at full direct sun) by the monthly-mean
+   insolation fraction `I` (`grid.radiation.insol_mean`) — the terrain-shaded,
+   sun-angle-modulated shortwave; the diffuse term scales `q_sw_dif` by the
+   diffuse-sky potential `I_dif` (`grid.radiation.insol_dif`: isotropic-sky view
+   factor of the tilted, horizon-limited surface × monthly-mean cos of the solar
+   zenith, 1 = flat unobstructed sky). Both zero recovers a constant bulk model.
 3. **Linear exchange.** `q = q_sw + q_lw0 + H_atm(T_air − T_s) + H_base(T_base − T_s)`,
    with a snow-insulation reduction of `H_base`. `q_lw0` is a constant flux into the
    surface that is neither albedo-scaled nor proportional to the temperature
@@ -73,7 +76,8 @@ and ablates over the cycle. This mirrors `compute_smb`'s water-year convention a
 its calendar-ordered output layout, so the two cores are drop-in comparable.
 
 Forcing is the `EnthalpyGrid`'s `temperature.t2m` [°C], `precipitation.precip`
-[m a⁻¹ w.e.] and `radiation.insol_mean` [fraction of direct sun], plus the static
+[m a⁻¹ w.e.], `radiation.insol_mean` [fraction of direct sun] and the static-geometry
+`radiation.insol_dif` [diffuse-sky potential], plus the static
 basal-temperature field `geometry.t_base` [°C]. Parameters live on the grid as
 `Constant`s (`thermodynamics.*`, `radiation.*`, `temperature.{sigma_t2m,
 T_transition}`); output state lives on `grid.state`. Precipitation is converted to
@@ -151,8 +155,8 @@ sub-step is recomputed forward (capturing its branch selectors) and transposed, 
 the adjoint resolves sub-monthly variance exactly as the forward does.
 
 **Targets.** Gradients are produced for the forcing (`t2m`, `precip`, `insol`,
-`t_base`) and the eight energy-balance parameters (`H_atm`, `H_base0`, `q_sw_bulk`,
-`q_sw_insol`, `q_lw0`, `albedo_snow`, `albedo_ice`, `M_albedo`) — the invertible set from the
+`t_base`) and the nine energy-balance parameters (`H_atm`, `H_base0`, `q_sw_bulk`,
+`q_sw_insol`, `q_sw_dif`, `q_lw0`, `albedo_snow`, `albedo_ice`, `M_albedo`) — the invertible set from the
 synopsis. The thermodynamic constants (`L_f`, `c_i`, `c_w`, `T_transition`,
 `M_insulation`, `rho_w`) are held fixed. The loss is seeded through the mass/energy
 outputs (`smb`, `M`, `E`, `runoff`, `ice_melt`); the pure diagnostics (`t_surface`,
@@ -167,7 +171,8 @@ gradients) that is the VJP of record and the finite-difference oracle, and the C
 kernel (`cuda/enthalpy.cu::compute_enthalpy_grad`, driven by `EnthalpyModel.adjoint`
 via `EnthalpyBackwardOperators`). Like ETIM's adjoint, the GPU pass **writes
 gradients directly into the grid**: the forcing into `Field.grad` (`t2m`, `precip`,
-`insol_mean`, `t_base`) and the eight parameters into their `Constant.grad` (per-pixel
+`insol_mean`, `t_base`; `insol_dif` is static geometry and carries no gradient) and the
+nine parameters into their `Constant.grad` (per-pixel
 on the GPU, reduced to scalars on the host — the `grad_mf`/`grad_rf` convention). The
 reverse pass linearises about the most recent `forward()` and reuses `grid.temp_dev`.
 
@@ -212,11 +217,12 @@ reverse pass linearises about the most recent `forward()` and reuses `grid.temp_
 - **Sub-daily temperature structure** — sub-steps are daily-scale; the explicit
   loop resolves day-to-day weather variance (`sigma_t2m`) but not the *diurnal*
   cycle (`daily_amp_t2m`/`phi_0`) that the PDD core integrates over 24 hourly bins,
-  and shortwave uses only `insol_mean` (not the `insol_cos`/`insol_sin` harmonics).
+  and direct shortwave uses only `insol_mean` (not the `insol_cos`/`insol_sin`
+  harmonics); diffuse sky radiation enters through the static `insol_dif` potential.
 - **Spatially-correlated / per-pixel noise** — the deviation vector is domain-wide
   uniform in v1 (see "Sub-monthly stochastic temperature").
 - **Thermodynamic-constant gradients** — the adjoint fixes `L_f`, `c_i`, `c_w`,
-  `T_transition`, `M_insulation`, `rho_w`; only the eight energy-balance parameters
+  `T_transition`, `M_insulation`, `rho_w`; only the nine energy-balance parameters
   and the forcing carry a gradient (see "Differentiability").
 - **Diagnostic-output seeds** — the adjoint seeds only the mass/energy outputs; a
   loss on `t_surface`/`albedo` is not differentiated (they feed no state).

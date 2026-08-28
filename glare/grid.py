@@ -101,7 +101,7 @@ class Insolation:
 # =========================================================================== #
 # Field groups for the snowpack-enthalpy core.  Its parameters live here as grid
 # Constants (the single source of truth), exactly as the ETIM parameters do above;
-# the eight invertible ones (see glare.operators.GRAD_PARAM_NAMES) get their .grad
+# the nine invertible ones (see glare.operators.GRAD_PARAM_NAMES) get their .grad
 # populated by the adjoint.
 # =========================================================================== #
 @dataclass
@@ -193,6 +193,10 @@ class Thermodynamics:
 @dataclass
 class Radiation:
     insol_mean: TimeField | None = None
+    # Diffuse-sky potential: isotropic-sky view factor of the tilted, horizon-limited
+    # surface times the monthly-mean positive cosine of the solar zenith, relative to
+    # the unobstructed horizontal diffuse flux.  Static geometry: no gradient.
+    insol_dif: TimeField | None = None
     q_sw_bulk: Constant = field(
         default_factory=lambda: Constant(
             value=cp.float32(100.0*SECONDS_PER_YEAR), name='q_sw_bulk',
@@ -202,6 +206,12 @@ class Radiation:
         default_factory=lambda: Constant(
             value=cp.float32(0.0), name='q_sw_insol', units='J m^{-2} yr^{-1}',
             attrs={'long_name':'seasonal shortwave flux at full direct sun (x insolation)'}))
+    # Diffuse-sky shortwave scale: absorbed diffuse = (1 - alpha) q_sw_dif insol_dif,
+    # with insol_dif the geometric diffuse potential (1 = flat, unobstructed sky).
+    q_sw_dif: Constant = field(
+        default_factory=lambda: Constant(
+            value=cp.float32(0.0), name='q_sw_dif', units='J m^{-2} yr^{-1}',
+            attrs={'long_name':'diffuse-sky shortwave flux at unit diffuse potential'}))
     # Constant flux into the surface that is NOT albedo-scaled and NOT proportional
     # to (T_air - T_s): the dT-independent part of net longwave / latent exchange
     # (clear-sky longwave deficit, evaporation into sub-saturated air).  Negative
@@ -488,4 +498,6 @@ class EnthalpyGrid(Grid):
     def _allocate_radiation(self):
         return Radiation(
             insol_mean=self._timefield('insol_mean', 'fraction of direct sunlight',
-                                       'monthly mean insolation'))
+                                       'monthly mean insolation'),
+            insol_dif=self._timefield('insol_dif', 'fraction of unobstructed horizontal diffuse sky',
+                                      'monthly mean diffuse-sky potential'))

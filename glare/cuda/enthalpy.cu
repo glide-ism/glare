@@ -61,12 +61,13 @@ extern "C" __global__ void compute_enthalpy(
     const float* __restrict__ precip,   // (nt,ny,nx) total precipitation       [m a-1 w.e.]
     const float* __restrict__ t2m,      // (nt,ny,nx) 2 m air temperature       [C]
     const float* __restrict__ insol,    // (nt,ny,nx) monthly-mean insolation   [fraction of direct sun]
+    const float* __restrict__ insol_dif,// (nt,ny,nx) monthly-mean diffuse-sky potential [fraction]
     const float* __restrict__ t_base,   // (ny,nx)    basal/substrate temperature [C]
     const float* __restrict__ debris,   // (ny,nx)    melt attenuation for snow-free ice [0,1]
     const float* __restrict__ temp_dev, // (nt,n_sub) sub-step air-temperature deviations [C]
     float L_f, float c_i, float c_w,
     float H_atm, float H_base0,
-    float q_sw_bulk, float q_sw_insol, float q_lw0,
+    float q_sw_bulk, float q_sw_insol, float q_sw_dif, float q_lw0,
     float albedo_snow, float albedo_ice, float M_albedo,
     float T_transition, float inv_M_insulation, float M_eps,
     float rho_w, float dt, int glacier_surface,
@@ -120,11 +121,14 @@ extern "C" __global__ void compute_enthalpy(
             float f_snow = 1.0f - expf(-M_solid / M_albedo);        // 0 bare ice -> 1 deep snow
             float alpha = albedo_ice + f_snow * (albedo_snow - albedo_ice);
 
-            // Absorbed shortwave = (1 - alpha) * (constant bulk + seasonal term).  The
-            // seasonal term scales q_sw_insol (the clear-sky flux at full direct sun)
-            // by the monthly-mean insolation fraction, giving the terrain-shaded,
-            // sun-angle-modulated shortwave.  q_sw_insol == 0 recovers the bulk model.
-            float q_sw = (1.0f - alpha) * (q_sw_bulk + q_sw_insol * insol[idx]);
+            // Absorbed shortwave = (1 - alpha) * (constant bulk + direct + diffuse).
+            // The direct term scales q_sw_insol (the clear-sky flux at full direct
+            // sun) by the monthly-mean insolation fraction (terrain-shaded, sun-angle
+            // modulated); the diffuse term scales q_sw_dif by the diffuse-sky
+            // potential (sky-view factor x mean cos zenith).  Both zero recovers
+            // the bulk model.
+            float q_sw = (1.0f - alpha) * (q_sw_bulk + q_sw_insol * insol[idx]
+                                           + q_sw_dif * insol_dif[idx]);
 
             // --- basal conductance (snow insulation) & linear heat exchange ---
             // H_base = H_base0 / (1 + M_solid/M_insulation); inv_M_insulation == 0
@@ -212,8 +216,9 @@ extern "C" __global__ void compute_enthalpy(
 // (enth_substep, filling an EnthIm) and transposed (enth_substep_back).
 //
 // Differentiation targets: the forcing (t2m, precip, insol, t_base), the static
-// debris melt-attenuation field, and the eight energy-balance parameters (H_atm,
-// H_base0, q_sw_bulk, q_sw_insol, q_lw0, albedo_snow, albedo_ice, M_albedo).  The
+// debris melt-attenuation field, and the nine energy-balance parameters (H_atm,
+// H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0, albedo_snow, albedo_ice,
+// M_albedo); the diffuse potential insol_dif is static geometry (no gradient).  The
 // thermodynamic constants (L_f, c_i, c_w, T_transition, M_insulation, rho_w) are
 // held fixed.  The loss is seeded through the mass/energy
 // outputs (smb, M, E, runoff, ice_melt); the pure diagnostics (t_surface, albedo)
@@ -225,7 +230,7 @@ extern "C" __global__ void compute_enthalpy(
 
 // Fixed (non-differentiated) parameters, bundled to keep the device signatures sane.
 struct EnthPar {
-    float L_f, c_i, c_w, H_atm, H_base0, q_sw_bulk, q_sw_insol, q_lw0;
+    float L_f, c_i, c_w, H_atm, H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0;
     float albedo_snow, albedo_ice, M_albedo, T_transition, inv_M_insulation;
     float M_eps, rho_w;
 };
@@ -233,7 +238,7 @@ struct EnthPar {
 // Every intermediate and branch selector the backward pass needs, so it never has
 // to reconstruct which regime a sub-step took.
 struct EnthIm {
-    float M1, E1, h, dM, P, T_air, Ts, Tl, fr, insol, Tb, D;
+    float M1, E1, h, dM, P, T_air, Ts, Tl, fr, insol, insol_dif, Tb, D;
     float alpha, S, fsnow, fexp, Msol, Hb, denomH, Htot, Q0;
     float denom, numer, Ecold, Eavail;
     int regime;          // 0 cold, 1 melt-at-0, 2 bare
@@ -249,7 +254,7 @@ struct EnthIm {
 // m-w.e. -> kg conversion (rho_w) is applied here, matching the forward kernel.
 __device__ __forceinline__ void enth_substep(
         const EnthPar pr, float M_in, float E_in, float P, float T_air,
-        float Tb, float insol_v, float D, float dt, int glacier,
+        float Tb, float insol_v, float insol_dif_v, float D, float dt, int glacier,
         float* M_out, float* E_out, float* runoff_out, float* icemelt_out,
         EnthIm* im) {
     float dM = fmaxf(P, 0.0f) * pr.rho_w * dt;
@@ -268,7 +273,7 @@ __device__ __forceinline__ void enth_substep(
     float fexp = expf(-Msol / pr.M_albedo);
     float fsnow = 1.0f - fexp;
     float alpha = pr.albedo_ice + fsnow * (pr.albedo_snow - pr.albedo_ice);
-    float S = pr.q_sw_bulk + pr.q_sw_insol * insol_v;
+    float S = pr.q_sw_bulk + pr.q_sw_insol * insol_v + pr.q_sw_dif * insol_dif_v;
     float q_sw = (1.0f - alpha) * S;
     float denomH = 1.0f + Msol * pr.inv_M_insulation;
     float Hb = pr.H_base0 / denomH;
@@ -310,7 +315,7 @@ __device__ __forceinline__ void enth_substep(
     if (im) {
         im->M1 = M1; im->E1 = E1; im->h = h; im->dM = dM; im->P = P;
         im->T_air = T_air; im->Ts = Ts; im->Tl = Tl; im->fr = fr;
-        im->insol = insol_v; im->Tb = Tb; im->D = D; im->alpha = alpha; im->S = S;
+        im->insol = insol_v; im->insol_dif = insol_dif_v; im->Tb = Tb; im->D = D; im->alpha = alpha; im->S = S;
         im->fsnow = fsnow; im->fexp = fexp; im->Msol = Msol; im->Hb = Hb;
         im->denomH = denomH; im->Htot = Htot; im->Q0 = Q0; im->denom = denom;
         im->numer = numer; im->Ecold = Ecold; im->Eavail = Eavail;
@@ -322,13 +327,13 @@ __device__ __forceinline__ void enth_substep(
 
 // Transpose of enth_substep.  Consumes the adjoints of this sub-step's outputs
 // (bar_M2/bar_E2 of the state, g_runoff/g_icemelt of the fluxes) and returns the
-// input-state adjoints (bar_M_in, bar_E_in) while accumulating (+=) into the eight
+// input-state adjoints (bar_M_in, bar_E_in) while accumulating (+=) into the nine
 // parameter grads and the per-sub-step forcing grads (gt2m, gpre, gins, gtb, gD).
 __device__ __forceinline__ void enth_substep_back(
         const EnthPar pr, const EnthIm* im, float dt, int glacier,
         float bar_M2, float bar_E2, float g_runoff, float g_icemelt,
         float* bar_M_in, float* bar_E_in,
-        float* gHa, float* gHb0, float* gqb, float* gqi, float* gqlw,
+        float* gHa, float* gHb0, float* gqb, float* gqi, float* gqd, float* gqlw,
         float* gas, float* gai, float* gMa,
         float* gt2m, float* gpre, float* gins, float* gtb, float* gD) {
     // Cleanup clamp (transpose): kill state-output adjoints if the mass collapsed.
@@ -373,7 +378,7 @@ __device__ __forceinline__ void enth_substep_back(
     }
 
     // ---- common pre-regime chain (shared by every branch) -------------------- //
-    float alpha = im->alpha, S = im->S, insol = im->insol;
+    float alpha = im->alpha, S = im->S, insol = im->insol, insol_dif = im->insol_dif;
     float Hb = im->Hb, denomH = im->denomH, Msol = im->Msol;
     float invMins = pr.inv_M_insulation;
 
@@ -390,9 +395,12 @@ __device__ __forceinline__ void enth_substep_back(
     // Hb = H_base0 / denomH
     *gHb0 += bar_Hb * (1.0f / denomH);
     float bar_Msol = bar_Hb * (-Hb * invMins / denomH);
-    // q_sw = (1 - alpha)(q_sw_bulk + q_sw_insol insol)
+    // q_sw = (1 - alpha)(q_sw_bulk + q_sw_insol insol + q_sw_dif insol_dif)
+    // (insol_dif is static geometry: no gradient; S holds the diffuse term so
+    // bar_alpha below is complete.)
     *gqb += bar_qsw * (1.0f - alpha);
     *gqi += bar_qsw * (1.0f - alpha) * insol;
+    *gqd += bar_qsw * (1.0f - alpha) * insol_dif;
     *gins += bar_qsw * (1.0f - alpha) * pr.q_sw_insol;
     float bar_alpha = -bar_qsw * S;
     // alpha = albedo_ice + fsnow (albedo_snow - albedo_ice)
@@ -442,6 +450,7 @@ extern "C" __global__ void compute_enthalpy_grad(
     float* __restrict__ grad_H_base0,   // (ny,nx)
     float* __restrict__ grad_q_sw_bulk, // (ny,nx)
     float* __restrict__ grad_q_sw_insol,// (ny,nx)
+    float* __restrict__ grad_q_sw_dif,  // (ny,nx)
     float* __restrict__ grad_q_lw0,     // (ny,nx)
     float* __restrict__ grad_albedo_snow,// (ny,nx)
     float* __restrict__ grad_albedo_ice,// (ny,nx)
@@ -456,12 +465,13 @@ extern "C" __global__ void compute_enthalpy_grad(
     const float* __restrict__ precip,
     const float* __restrict__ t2m,
     const float* __restrict__ insol,
+    const float* __restrict__ insol_dif,
     const float* __restrict__ t_base,
     const float* __restrict__ debris,
     const float* __restrict__ temp_dev,
     float L_f, float c_i, float c_w,
     float H_atm, float H_base0,
-    float q_sw_bulk, float q_sw_insol, float q_lw0,
+    float q_sw_bulk, float q_sw_insol, float q_sw_dif, float q_lw0,
     float albedo_snow, float albedo_ice, float M_albedo,
     float T_transition, float inv_M_insulation, float M_eps,
     float rho_w, float dt, int glacier_surface,
@@ -481,7 +491,7 @@ extern "C" __global__ void compute_enthalpy_grad(
     EnthPar pr;
     pr.L_f = L_f; pr.c_i = c_i; pr.c_w = c_w; pr.H_atm = H_atm;
     pr.H_base0 = H_base0; pr.q_sw_bulk = q_sw_bulk; pr.q_sw_insol = q_sw_insol;
-    pr.q_lw0 = q_lw0;
+    pr.q_sw_dif = q_sw_dif; pr.q_lw0 = q_lw0;
     pr.albedo_snow = albedo_snow; pr.albedo_ice = albedo_ice;
     pr.M_albedo = M_albedo; pr.T_transition = T_transition;
     pr.inv_M_insulation = inv_M_insulation; pr.M_eps = M_eps; pr.rho_w = rho_w;
@@ -497,14 +507,15 @@ extern "C" __global__ void compute_enthalpy_grad(
             M_start[s] = M; E_start[s] = E;
             for (int d = 0; d < n_sub; d++) {
                 float T_air = t2m[idx] + temp_dev[m * n_sub + d];
-                enth_substep(pr, M, E, precip[idx], T_air, Tb, insol[idx], D,
+                enth_substep(pr, M, E, precip[idx], T_air, Tb, insol[idx],
+                             insol_dif[idx], D,
                              dt_sub, glacier_surface, &M, &E, &ro, &ic, 0);
             }
         }
     }
 
     // Per-pixel parameter grad accumulators (reduced to scalars on the host).
-    float gHa = 0.0f, gHb0 = 0.0f, gqb = 0.0f, gqi = 0.0f, gqlw = 0.0f;
+    float gHa = 0.0f, gHb0 = 0.0f, gqb = 0.0f, gqi = 0.0f, gqd = 0.0f, gqlw = 0.0f;
     float gas = 0.0f, gai = 0.0f, gMa = 0.0f, gtb = 0.0f, gD = 0.0f;
 
     // 2) Reverse-in-time scan carrying the state adjoints (bar_M, bar_E).
@@ -521,7 +532,8 @@ extern "C" __global__ void compute_enthalpy_grad(
             for (int d = 0; d < n_sub; d++) {
                 Msub[d] = M; Esub[d] = E;
                 float T_air = t2m[idx] + temp_dev[m * n_sub + d];
-                enth_substep(pr, M, E, precip[idx], T_air, Tb, insol[idx], D,
+                enth_substep(pr, M, E, precip[idx], T_air, Tb, insol[idx],
+                             insol_dif[idx], D,
                              dt_sub, glacier_surface, &M, &E, &ro, &ic, 0);
             }
         }
@@ -538,12 +550,13 @@ extern "C" __global__ void compute_enthalpy_grad(
             float M2, E2, ro, ic;
             float T_air = t2m[idx] + temp_dev[m * n_sub + d];
             enth_substep(pr, Msub[d], Esub[d], precip[idx], T_air, Tb, insol[idx],
-                         D, dt_sub, glacier_surface, &M2, &E2, &ro, &ic, &im);
+                         insol_dif[idx], D, dt_sub, glacier_surface,
+                         &M2, &E2, &ro, &ic, &im);
 
             float nbM, nbE;
             enth_substep_back(pr, &im, dt_sub, glacier_surface,
                               bar_M, bar_E, g_ro, g_ic, &nbM, &nbE,
-                              &gHa, &gHb0, &gqb, &gqi, &gqlw, &gas, &gai, &gMa,
+                              &gHa, &gHb0, &gqb, &gqi, &gqd, &gqlw, &gas, &gai, &gMa,
                               &gt2m_m, &gpre_m, &gins_m, &gtb, &gD);
             bar_M = nbM; bar_E = nbE;
         }
@@ -559,6 +572,7 @@ extern "C" __global__ void compute_enthalpy_grad(
     grad_H_base0[pix] = gHb0;
     grad_q_sw_bulk[pix] = gqb;
     grad_q_sw_insol[pix] = gqi;
+    grad_q_sw_dif[pix] = gqd;
     grad_q_lw0[pix] = gqlw;
     grad_albedo_snow[pix] = gas;
     grad_albedo_ice[pix] = gai;

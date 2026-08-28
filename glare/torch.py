@@ -92,11 +92,14 @@ class EnthalpyStep(torch.autograd.Function):
 
     Differentiable inputs (the full set the enthalpy adjoint produces gradients for):
     the forcing fields ``t2m``, ``precip``, ``insol_mean`` (all ``(nt, ny, nx)``) and
-    ``t_base`` (``(ny, nx)``), the eight energy-balance parameters
-    (``H_atm``, ``H_base0``, ``q_sw_bulk``, ``q_sw_insol``, ``q_lw0``,
+    ``t_base`` (``(ny, nx)``), the nine energy-balance parameters
+    (``H_atm``, ``H_base0``, ``q_sw_bulk``, ``q_sw_insol``, ``q_sw_dif``, ``q_lw0``,
     ``albedo_snow``, ``albedo_ice``, ``M_albedo``) as scalar tensors, and the optional ``debris``
     melt-attenuation field (``(ny, nx)``, 1 = clean ice; ``None`` sets the grid to
     clean ice, mirroring how :class:`GlareStep` carries ETIM's debris field).
+    ``insol_dif`` (``(nt, ny, nx)``, the diffuse-sky potential, or ``None`` for zeros)
+    is static geometry: it is a forward input only and its gradient slot is always
+    ``None`` -- passing it with ``requires_grad=True`` yields no gradient, not an error.
     Returns ``smb`` (``(nt, ny, nx)``).
 
     Other configuration (``n_substeps``, ``glacier_surface``, the DEM ``geometry.srf``
@@ -113,19 +116,22 @@ class EnthalpyStep(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, model, t2m, precip, insol_mean, t_base,
-                H_atm, H_base0, q_sw_bulk, q_sw_insol, q_lw0,
+    def forward(ctx, model, t2m, precip, insol_mean, insol_dif, t_base,
+                H_atm, H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0,
                 albedo_snow, albedo_ice, M_albedo,
                 debris=None, temp_deviations=None):
-        EnthalpyStep._set_inputs(model, t2m, precip, insol_mean, t_base,
-                                 H_atm, H_base0, q_sw_bulk, q_sw_insol, q_lw0,
+        EnthalpyStep._set_inputs(model, t2m, precip, insol_mean, insol_dif, t_base,
+                                 H_atm, H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0,
                                  albedo_snow, albedo_ice, M_albedo, debris)
         model.forward(temp_deviations=temp_deviations)
         ctx.model = model
         ctx.debris_was_tensor = torch.is_tensor(debris)
+        ctx.insol_dif_was_tensor = torch.is_tensor(insol_dif)
         saved = (t2m, precip, insol_mean, t_base,
-                 H_atm, H_base0, q_sw_bulk, q_sw_insol, q_lw0,
+                 H_atm, H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0,
                  albedo_snow, albedo_ice, M_albedo)
+        if ctx.insol_dif_was_tensor:
+            saved = saved + (insol_dif,)
         if ctx.debris_was_tensor:
             saved = saved + (debris,)
         ctx.save_for_backward(*saved)
@@ -134,13 +140,15 @@ class EnthalpyStep(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_smb):
         (t2m, precip, insol_mean, t_base, H_atm, H_base0, q_sw_bulk,
-         q_sw_insol, q_lw0, albedo_snow, albedo_ice, M_albedo,
+         q_sw_insol, q_sw_dif, q_lw0, albedo_snow, albedo_ice, M_albedo,
          *rest) = ctx.saved_tensors
-        debris = rest[0] if ctx.debris_was_tensor else None
+        rest = list(rest)
+        insol_dif = rest.pop(0) if ctx.insol_dif_was_tensor else None
+        debris = rest.pop(0) if ctx.debris_was_tensor else None
         model = ctx.model
 
-        EnthalpyStep._set_inputs(model, t2m, precip, insol_mean, t_base,
-                                 H_atm, H_base0, q_sw_bulk, q_sw_insol, q_lw0,
+        EnthalpyStep._set_inputs(model, t2m, precip, insol_mean, insol_dif, t_base,
+                                 H_atm, H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0,
                                  albedo_snow, albedo_ice, M_albedo, debris)
 
         need = ctx.needs_input_grad
@@ -148,9 +156,9 @@ class EnthalpyStep(torch.autograd.Function):
         # unwanted (nt, ny, nx) gradient goes to a shared sink instead of a
         # persistent per-field buffer (the grid-side twin of take() below).
         wanted = {name for idx, name in
-                  ((1, "t2m"), (2, "precip"), (3, "insol_mean"), (4, "t_base"))
+                  ((1, "t2m"), (2, "precip"), (3, "insol_mean"), (5, "t_base"))
                   if need[idx]}
-        if ctx.debris_was_tensor and need[13]:
+        if ctx.debris_was_tensor and need[15]:
             wanted.add("debris")
         model.adjoint(grad_smb=cp.asarray(grad_smb), wanted=wanted)
 
@@ -167,32 +175,38 @@ class EnthalpyStep(torch.autograd.Function):
         g_t2m = take(1, g.temperature.t2m.grad)
         g_precip = take(2, g.precipitation.precip.grad)
         g_insol = take(3, g.radiation.insol_mean.grad)
-        g_t_base = take(4, g.geometry.t_base.grad)
-        g_H_atm = take(5, g.thermodynamics.H_atm.grad)
-        g_H_base0 = take(6, g.thermodynamics.H_base0.grad)
-        g_q_sw_bulk = take(7, g.radiation.q_sw_bulk.grad)
-        g_q_sw_insol = take(8, g.radiation.q_sw_insol.grad)
-        g_q_lw0 = take(9, g.radiation.q_lw0.grad)
-        g_albedo_snow = take(10, g.radiation.albedo_snow.grad)
-        g_albedo_ice = take(11, g.radiation.albedo_ice.grad)
-        g_M_albedo = take(12, g.radiation.M_albedo.grad)
-        g_debris = (take(13, g.geometry.debris.grad)
+        g_t_base = take(5, g.geometry.t_base.grad)
+        g_H_atm = take(6, g.thermodynamics.H_atm.grad)
+        g_H_base0 = take(7, g.thermodynamics.H_base0.grad)
+        g_q_sw_bulk = take(8, g.radiation.q_sw_bulk.grad)
+        g_q_sw_insol = take(9, g.radiation.q_sw_insol.grad)
+        g_q_sw_dif = take(10, g.radiation.q_sw_dif.grad)
+        g_q_lw0 = take(11, g.radiation.q_lw0.grad)
+        g_albedo_snow = take(12, g.radiation.albedo_snow.grad)
+        g_albedo_ice = take(13, g.radiation.albedo_ice.grad)
+        g_M_albedo = take(14, g.radiation.M_albedo.grad)
+        g_debris = (take(15, g.geometry.debris.grad)
                     if ctx.debris_was_tensor else None)
 
         # Trailing None is the (non-differentiable) temp_deviations slot; torch trims
         # trailing None gradients when the caller omitted the optional arguments.
-        return (None, g_t2m, g_precip, g_insol, g_t_base,
-                g_H_atm, g_H_base0, g_q_sw_bulk, g_q_sw_insol, g_q_lw0,
+        # insol_dif's slot (index 4) is always None: static geometry, no gradient.
+        return (None, g_t2m, g_precip, g_insol, None, g_t_base,
+                g_H_atm, g_H_base0, g_q_sw_bulk, g_q_sw_insol, g_q_sw_dif, g_q_lw0,
                 g_albedo_snow, g_albedo_ice, g_M_albedo, g_debris, None)
 
     @staticmethod
-    def _set_inputs(model, t2m, precip, insol_mean, t_base,
-                    H_atm, H_base0, q_sw_bulk, q_sw_insol, q_lw0,
+    def _set_inputs(model, t2m, precip, insol_mean, insol_dif, t_base,
+                    H_atm, H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0,
                     albedo_snow, albedo_ice, M_albedo, debris=None):
         g = model.grid
         g.temperature.t2m.set(cp.asarray(t2m.data))
         g.precipitation.precip.set(cp.asarray(precip.data))
         g.radiation.insol_mean.set(cp.asarray(insol_mean.data))
+        if insol_dif is None:
+            g.radiation.insol_dif.set(0.0)          # no diffuse sky
+        else:
+            g.radiation.insol_dif.set(cp.asarray(insol_dif.data))
         g.geometry.t_base.set(cp.asarray(t_base.data))
         if debris is None:
             g.geometry.debris.set(1.0)              # clean ice, no attenuation
@@ -202,6 +216,7 @@ class EnthalpyStep(torch.autograd.Function):
         g.thermodynamics.H_base0.set(cp.float32(H_base0.item()))
         g.radiation.q_sw_bulk.set(cp.float32(q_sw_bulk.item()))
         g.radiation.q_sw_insol.set(cp.float32(q_sw_insol.item()))
+        g.radiation.q_sw_dif.set(cp.float32(q_sw_dif.item()))
         g.radiation.q_lw0.set(cp.float32(q_lw0.item()))
         g.radiation.albedo_snow.set(cp.float32(albedo_snow.item()))
         g.radiation.albedo_ice.set(cp.float32(albedo_ice.item()))

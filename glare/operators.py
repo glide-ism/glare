@@ -119,7 +119,7 @@ class BackwardOperators:
 
 # The energy-balance parameters the adjoint differentiates (their Constant.grad is
 # populated by EnthalpyBackwardOperators).  The thermodynamic constants are fixed.
-GRAD_PARAM_NAMES = ("H_atm", "H_base0", "q_sw_bulk", "q_sw_insol", "q_lw0",
+GRAD_PARAM_NAMES = ("H_atm", "H_base0", "q_sw_bulk", "q_sw_insol", "q_sw_dif", "q_lw0",
                     "albedo_snow", "albedo_ice", "M_albedo")
 
 
@@ -158,12 +158,13 @@ class EnthalpyForwardOperators:
             g.precipitation.precip_eff.data,   # redistributed precip (post-avalanche)
             tm.t2m.data,
             rad.insol_mean.data,
+            rad.insol_dif.data,
             g.geometry.t_base.data,
             g.geometry.debris.data,
             g.temp_dev,
             th.L_f.value, th.c_i.value, th.c_w.value,
             th.H_atm.value, th.H_base0.value,
-            rad.q_sw_bulk.value, rad.q_sw_insol.value, rad.q_lw0.value,
+            rad.q_sw_bulk.value, rad.q_sw_insol.value, rad.q_sw_dif.value, rad.q_lw0.value,
             rad.albedo_snow.value, rad.albedo_ice.value, rad.M_albedo.value,
             tm.T_transition.value, f(_inv_M_insulation(th.M_insulation.value)),
             th.M_eps.value,
@@ -305,19 +306,21 @@ class EnthalpyBackwardOperators:
         f = cp.float32
         kernel(grid, block, (
             grad_t2m, grad_precip, grad_insol, grad_t_base, grad_debris,
-            pg["H_atm"], pg["H_base0"], pg["q_sw_bulk"], pg["q_sw_insol"], pg["q_lw0"],
+            pg["H_atm"], pg["H_base0"], pg["q_sw_bulk"], pg["q_sw_insol"], pg["q_sw_dif"],
+            pg["q_lw0"],
             pg["albedo_snow"], pg["albedo_ice"], pg["M_albedo"],
             seeds["smb"], seeds["M"], seeds["E"],
             seeds["runoff"], seeds["ice_melt"],
             g.precipitation.precip_eff.data,   # recompute forward from the effective precip
             tm.t2m.data,
             rad.insol_mean.data,
+            rad.insol_dif.data,
             g.geometry.t_base.data,
             g.geometry.debris.data,
             g.temp_dev,
             th.L_f.value, th.c_i.value, th.c_w.value,
             th.H_atm.value, th.H_base0.value,
-            rad.q_sw_bulk.value, rad.q_sw_insol.value, rad.q_lw0.value,
+            rad.q_sw_bulk.value, rad.q_sw_insol.value, rad.q_sw_dif.value, rad.q_lw0.value,
             rad.albedo_snow.value, rad.albedo_ice.value, rad.M_albedo.value,
             tm.T_transition.value, f(_inv_M_insulation(th.M_insulation.value)),
             th.M_eps.value,
@@ -330,7 +333,7 @@ class EnthalpyBackwardOperators:
         targets = {
             "H_atm": th.H_atm, "H_base0": th.H_base0,
             "q_sw_bulk": rad.q_sw_bulk, "q_sw_insol": rad.q_sw_insol,
-            "q_lw0": rad.q_lw0,
+            "q_sw_dif": rad.q_sw_dif, "q_lw0": rad.q_lw0,
             "albedo_snow": rad.albedo_snow, "albedo_ice": rad.albedo_ice,
             "M_albedo": rad.M_albedo,
         }

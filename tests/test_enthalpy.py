@@ -422,7 +422,7 @@ def test_substep_matches_step():
 # --------------------------------------------------------------------------- #
 # Adjoint correctness: the hand-derived scalar VJP (run_column_adjoint) matches
 # central finite differences of run_column for every differentiation target --
-# forcing (t2m, precip, insol, t_base) and all eight parameters -- with sub-steps.
+# forcing (t2m, precip, insol, t_base) and all nine parameters -- with sub-steps.
 # This is the ground-truth check; the kernel is then pinned to this reference.
 # --------------------------------------------------------------------------- #
 def test_run_column_adjoint_finite_difference():
@@ -449,11 +449,17 @@ def test_run_column_adjoint_finite_difference():
         # q_lw0 drawn after debris (same rule); non-zero so the relative FD step
         # in the parameter loop below is well scaled.
         p.q_lw0 = float(r.uniform(-60.0, -5.0)) * SECONDS_PER_YEAR
-        return precip, t2m, insol, t_base, debris, dev, p, seeds
+        # Diffuse-sky potential + scale, drawn after everything else (same rule);
+        # both nonzero so the q_sw_dif FD entry and the albedo entries (through the
+        # redefined S) are non-degenerate.
+        insol_dif = r.uniform(0.0, 0.3, nt)
+        p.q_sw_dif = float(r.uniform(100.0, 300.0)) * SECONDS_PER_YEAR
+        return precip, t2m, insol, t_base, debris, dev, p, seeds, insol_dif
 
-    def loss(precip, t2m, insol, t_base, debris, dev, p, seeds):
+    def loss(precip, t2m, insol, t_base, debris, dev, p, seeds, insol_dif):
         out = run_column(precip, t2m, t_base, dt, p=p, start_month=start_month,
-                         insol=insol, temp_dev=dev, debris=debris)
+                         insol=insol, temp_dev=dev, debris=debris,
+                         insol_dif=insol_dif)
         L = 0.0
         for name, key in (("smb", "grad_smb"), ("M", "grad_M"), ("E", "grad_E"),
                           ("runoff", "grad_runoff"), ("ice_melt", "grad_ice_melt")):
@@ -465,13 +471,14 @@ def test_run_column_adjoint_finite_difference():
 
     worst = 0.0
     for case in range(5):
-        precip, t2m, insol, t_base, debris, dev, p, seeds = make_case(case)
+        precip, t2m, insol, t_base, debris, dev, p, seeds, insol_dif = make_case(case)
         grad = run_column_adjoint(precip, t2m, t_base, dt, p=p,
                                   start_month=start_month, insol=insol,
+                                  insol_dif=insol_dif,
                                   temp_dev=dev, debris=debris, **seeds)
 
         def L(pre=precip, tt=t2m, ins=insol, tb=t_base, deb=debris, pp=p):
-            return loss(pre, tt, ins, tb, deb, dev, pp, seeds)
+            return loss(pre, tt, ins, tb, deb, dev, pp, seeds, insol_dif)
 
         for mm in range(nt):
             h = 1e-5
@@ -524,6 +531,11 @@ def _kernel_vs_reference_adjoint(n_sub, seed):
     g.radiation.q_sw_insol.set(200.0 * SECONDS_PER_YEAR)
     g.geometry.t_base.set(cp.asarray(t_base))
     g.geometry.debris.set(cp.asarray(debris))
+    # Diffuse sky: separate generator so the existing draws are unchanged.
+    insol_dif = np.random.default_rng(seed + 1000).uniform(
+        0.0, 0.4, (nt, ny, nx)).astype(np.float32)
+    g.radiation.insol_dif.set(cp.asarray(insol_dif))
+    g.radiation.q_sw_dif.set(300.0 * SECONDS_PER_YEAR)
 
     dev = generate_temp_deviations(nt, n_sub, sigma=4.0, rng=rng) if n_sub > 1 else None
 
@@ -555,7 +567,7 @@ def _kernel_vs_reference_adjoint(n_sub, seed):
             gr = run_column_adjoint(
                 precip[:, i, j], t2m[:, i, j], float(t_base[i, j]), dt, p=p,
                 start_month=start_month, insol=insol[:, i, j], temp_dev=dev_col,
-                debris=float(debris[i, j]),
+                insol_dif=insol_dif[:, i, j], debris=float(debris[i, j]),
                 grad_smb=seeds["smb"][:, i, j], grad_M=seeds["M"][:, i, j],
                 grad_E=seeds["E"][:, i, j], grad_runoff=seeds["runoff"][:, i, j],
                 grad_ice_melt=seeds["ice_melt"][:, i, j])
@@ -605,6 +617,9 @@ def test_adjoint_gradient_check_end_to_end():
     g.radiation.insol_mean.set(cp.asarray(insol))
     g.radiation.q_sw_insol.set(200.0 * SECONDS_PER_YEAR)
     g.radiation.q_lw0.set(-30.0 * SECONDS_PER_YEAR)
+    insol_dif = np.random.default_rng(1021).uniform(0.0, 0.4, (nt, ny, nx)).astype(np.float32)
+    g.radiation.insol_dif.set(cp.asarray(insol_dif))
+    g.radiation.q_sw_dif.set(300.0 * SECONDS_PER_YEAR)
     g.geometry.t_base.set(cp.asarray(t_base))
     enth = EnthalpyModel(g)
 
@@ -620,6 +635,7 @@ def test_adjoint_gradient_check_end_to_end():
     g_t2m = cp.asnumpy(g.temperature.t2m.grad)
     g_H_atm = g.thermodynamics.H_atm.grad
     g_q_lw0 = g.radiation.q_lw0.grad
+    g_q_sw_dif = g.radiation.q_sw_dif.grad
 
     # Central difference w.r.t. a handful of t2m cells.
     base_t2m = g.temperature.t2m.data.copy()
@@ -650,6 +666,15 @@ def test_adjoint_gradient_check_end_to_end():
     g.radiation.q_lw0.set(base_q)
     num = (Lp - Lm) / (2 * h)
     assert abs(g_q_lw0 - num) <= 2e-2 * (1.0 + abs(num))
+
+    # The diffuse-sky scale: absolute step as well.
+    base_q = float(g.radiation.q_sw_dif.value)
+    h = 20.0 * SECONDS_PER_YEAR
+    g.radiation.q_sw_dif.set(base_q + h); Lp = loss()
+    g.radiation.q_sw_dif.set(base_q - h); Lm = loss()
+    g.radiation.q_sw_dif.set(base_q)
+    num = (Lp - Lm) / (2 * h)
+    assert abs(g_q_sw_dif - num) <= 2e-2 * (1.0 + abs(num))
 
 
 # --------------------------------------------------------------------------- #

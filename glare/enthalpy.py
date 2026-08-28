@@ -41,7 +41,7 @@ The model is reverse-mode differentiable: :func:`run_column_adjoint` (scalar) an
 -- a checkpointed replay then a reverse-in-time scan carrying the state adjoints, as
 in ``compute_smb_grad``.  Like ETIM, the adjoint writes gradients directly into the
 grid's ``Field.grad`` / ``Constant.grad`` buffers: the forcing (``t2m``, ``precip``,
-``insol_mean``, ``t_base``) and the eight energy-balance parameters in
+``insol_mean``, ``t_base``) and the nine energy-balance parameters in
 :data:`~glare.operators.GRAD_PARAM_NAMES`.  Burial of the active reservoir into ice
 (``M_active_max``) is not applied in v1, matching the reference ``step``.
 """
@@ -96,7 +96,7 @@ def scalar_params(grid) -> SimpleNamespace:
         L_f=float(th.L_f.value), c_i=float(th.c_i.value), c_w=float(th.c_w.value),
         H_atm=float(th.H_atm.value), H_base0=float(th.H_base0.value),
         q_sw_bulk=float(rad.q_sw_bulk.value), q_sw_insol=float(rad.q_sw_insol.value),
-        q_lw0=float(rad.q_lw0.value),
+        q_lw0=float(rad.q_lw0.value), q_sw_dif=float(rad.q_sw_dif.value),
         albedo_snow=float(rad.albedo_snow.value), albedo_ice=float(rad.albedo_ice.value),
         M_albedo=float(rad.M_albedo.value),
         T_transition=float(tm.T_transition.value),
@@ -152,6 +152,7 @@ def step(
     glacier_surface: bool = True,
     insolation: float = 0.0,   # monthly-mean insolation [fraction of direct sun]
     debris: float = 1.0,       # debris melt attenuation for snow-free ice [0, 1]
+    insolation_dif: float = 0.0,  # monthly-mean diffuse-sky potential [fraction]
 ) -> tuple[State, Fluxes]:
     """Advance one forcing interval.
 
@@ -189,7 +190,8 @@ def step(
     M_solid = solid_mass_from_state(M, E, p)
     f_snow = snow_cover_fraction(M_solid, p.M_albedo)
     alpha = p.albedo_ice + f_snow * (p.albedo_snow - p.albedo_ice)
-    q_sw = (1.0 - alpha) * (p.q_sw_bulk + p.q_sw_insol * insolation)
+    q_sw = (1.0 - alpha) * (p.q_sw_bulk + p.q_sw_insol * insolation
+                            + p.q_sw_dif * insolation_dif)
 
     H_base = basal_conductance(M_solid, p)
     H_total = p.H_atm + H_base
@@ -280,6 +282,7 @@ def run_column(
     start_month: int = 9,
     glacier_surface: bool = True,
     insol=None,        # (nt,) monthly-mean insolation [fraction]; None -> zeros
+    insol_dif=None,    # (nt,) monthly-mean diffuse-sky potential; None -> zeros
     temp_dev=None,     # (nt, n_sub) sub-step deviations [degC]; None -> 1 step, no noise
     debris: float = 1.0,  # debris melt attenuation for snow-free ice [0, 1]
 ) -> dict:
@@ -303,6 +306,8 @@ def run_column(
     t2m = np.asarray(t2m, dtype=float)
     nt = precip.shape[0]
     insol = np.zeros(nt) if insol is None else np.asarray(insol, dtype=float)
+    insol_dif = (np.zeros(nt) if insol_dif is None
+                 else np.asarray(insol_dif, dtype=float))
     if temp_dev is None:
         temp_dev = np.zeros((nt, 1))
     else:
@@ -324,7 +329,7 @@ def run_column(
             T_air = t2m[m] + temp_dev[m, d]
             state, flux = step(state, P_si, T_air, t_base, dt_sub, p,
                                glacier_surface=glacier_surface, insolation=insol[m],
-                               debris=debris)
+                               debris=debris, insolation_dif=insol_dif[m])
             runoff_m += flux.runoff_from_pack
             ice_melt_m += flux.ice_melt
             tsurf_sum += flux.T_surface
@@ -354,14 +359,14 @@ def run_column(
 # kept in lock-step exactly as `run_column` mirrors the forward kernel.
 #
 # Differentiation targets: the forcing (t2m, precip, insol, t_base), the static
-# debris attenuation field, and the eight energy-balance parameters in
+# debris attenuation field, and the nine energy-balance parameters in
 # GRAD_PARAM_NAMES.  The thermodynamic constants (L_f, c_i, c_w, T_transition,
 # M_insulation, rho_w) are held fixed.  The loss is seeded through the
 # mass/energy outputs (smb, M, E, runoff, ice_melt); the pure diagnostics
 # (t_surface, albedo) are not seeded.
 # --------------------------------------------------------------------------- #
 def _substep_forward(M_in, E_in, P, T_air, T_base, insol, dt, p, glacier,
-                     debris=1.0):
+                     debris=1.0, insol_dif=0.0):
     """One forcing sub-step, returning ``(M, E, runoff, ice_melt, im)``.
 
     Numerically identical to :func:`step` (asserted by ``test_substep_matches_step``)
@@ -388,7 +393,7 @@ def _substep_forward(M_in, E_in, P, T_air, T_base, insol, dt, p, glacier,
     fexp = np.exp(-Msol / p.M_albedo)
     fsnow = 1.0 - fexp
     alpha = p.albedo_ice + fsnow * (p.albedo_snow - p.albedo_ice)
-    S = p.q_sw_bulk + p.q_sw_insol * insol
+    S = p.q_sw_bulk + p.q_sw_insol * insol + p.q_sw_dif * insol_dif
     q_sw = (1.0 - alpha) * S
 
     invMins = p.inv_M_insulation
@@ -437,7 +442,7 @@ def _substep_forward(M_in, E_in, P, T_air, T_base, insol, dt, p, glacier,
         E2 = 0.0
 
     im = dict(M1=M1, E1=E1, h=h, dM=dM, P=P, T_air=T_air, Ts=Ts, Tl=Tl, fr=fr,
-              insol=insol, T_base=T_base, liq=liq, liq_by_M=liq_by_M,
+              insol=insol, insol_dif=insol_dif, T_base=T_base, liq=liq, liq_by_M=liq_by_M,
               Msol=Msol, Msol_pos=Msol_pos, fexp=fexp, fsnow=fsnow, alpha=alpha,
               S=S, denomH=denomH, Hb=Hb, Htot=Htot, Q0=Q0, denom=denom,
               numer=numer, Ecold=Ecold, Eavail=Eavail, regime=regime,
@@ -452,7 +457,7 @@ def _substep_backward(im, bar_M2, bar_E2, g_runoff, g_icemelt, dt, p, glacier):
     Consumes the adjoints of this sub-step's outputs -- ``bar_M2``/``bar_E2`` of the
     carried state and ``g_runoff``/``g_icemelt`` of the two flux outputs -- and
     returns ``(bar_M_in, bar_E_in, g)``: the adjoints of the input state and a dict
-    of gradient contributions for the forcing and the eight parameters.
+    of gradient contributions for the forcing and the nine parameters.
     """
     # Cleanup clamp (transpose): kill the state-output adjoints when the reservoir
     # collapsed to a clean bare state (gate closed).
@@ -522,9 +527,12 @@ def _substep_backward(im, bar_M2, bar_E2, g_runoff, g_icemelt, dt, p, glacier):
     # Hb = H_base0 / denomH,  denomH = 1 + Msol invMins
     g["H_base0"] += bar_Hb * (1.0 / denomH)
     bar_Msol = bar_Hb * (-Hb * invMins / denomH)
-    # q_sw = (1 - alpha) (q_sw_bulk + q_sw_insol insol)
+    # q_sw = (1 - alpha) (q_sw_bulk + q_sw_insol insol + q_sw_dif insol_dif)
+    # (insol_dif is static geometry and carries no gradient; S already holds
+    # the diffuse term, so bar_alpha below is complete.)
     g["q_sw_bulk"] += bar_qsw * (1.0 - alpha)
     g["q_sw_insol"] += bar_qsw * (1.0 - alpha) * insol
+    g["q_sw_dif"] += bar_qsw * (1.0 - alpha) * im["insol_dif"]
     g["insol"] += bar_qsw * (1.0 - alpha) * p.q_sw_insol
     bar_alpha = -bar_qsw * S
     # alpha = albedo_ice + fsnow (albedo_snow - albedo_ice)
@@ -565,7 +573,7 @@ def _substep_backward(im, bar_M2, bar_E2, g_runoff, g_icemelt, dt, p, glacier):
 
 def run_column_adjoint(
     precip, t2m, t_base, dt, p, start_month=9, glacier_surface=True,
-    insol=None, temp_dev=None, debris=1.0,
+    insol=None, insol_dif=None, temp_dev=None, debris=1.0,
     grad_smb=None, grad_M=None, grad_E=None, grad_runoff=None, grad_ice_melt=None,
 ) -> dict:
     """Reverse-mode gradient of one water-year column (scalar reference).
@@ -575,7 +583,7 @@ def run_column_adjoint(
     seeded output field (``(nt,)`` each, calendar-month order; ``None`` -> zeros).
     Returns a plain **dict** of gradients: ``t2m``/``precip``/``insol`` as ``(nt,)``
     arrays, ``t_base`` and ``debris`` scalars (static per-column fields), and the
-    eight parameter gradients (summed over the year) keyed by name -- the CPU
+    nine parameter gradients (summed over the year) keyed by name -- the CPU
     counterpart of the grid ``.grad`` buffers the GPU ``EnthalpyModel.adjoint``
     populates.
 
@@ -589,6 +597,8 @@ def run_column_adjoint(
     t2m = np.asarray(t2m, dtype=float)
     nt = precip.shape[0]
     insol = np.zeros(nt) if insol is None else np.asarray(insol, dtype=float)
+    insol_dif = (np.zeros(nt) if insol_dif is None
+                 else np.asarray(insol_dif, dtype=float))
     if temp_dev is None:
         temp_dev = np.zeros((nt, 1))
     else:
@@ -617,7 +627,7 @@ def run_column_adjoint(
             T_air = t2m[m] + temp_dev[m, d]
             M, E, _, _, _ = _substep_forward(M, E, P_si[m], T_air, t_base,
                                              insol[m], dt_sub, p, glacier_surface,
-                                             debris=debris)
+                                             debris=debris, insol_dif=insol_dif[m])
 
     grad = {"t2m": np.zeros(nt), "precip": np.zeros(nt), "insol": np.zeros(nt),
             "t_base": 0.0, "debris": 0.0, **{k: 0.0 for k in GRAD_PARAM_NAMES}}
@@ -636,7 +646,7 @@ def run_column_adjoint(
             T_air = t2m[m] + temp_dev[m, d]
             _, _, _, _, im = _substep_forward(M_in, E_in, P_si[m], T_air, t_base,
                                               insol[m], dt_sub, p, glacier_surface,
-                                              debris=debris)
+                                              debris=debris, insol_dif=insol_dif[m])
             bar_M, bar_E, gd = _substep_backward(im, bar_M, bar_E, g_ro, g_ic,
                                                  dt_sub, p, glacier_surface)
             for k in GRAD_PARAM_NAMES:
@@ -805,7 +815,7 @@ class EnthalpyModel:
         forcing gradients into ``grid.temperature.t2m.grad``,
         ``grid.precipitation.precip.grad``, ``grid.radiation.insol_mean.grad``,
         ``grid.geometry.t_base.grad`` and ``grid.geometry.debris.grad``, and the
-        eight energy-balance parameter gradients into the corresponding
+        nine energy-balance parameter gradients into the corresponding
         ``Constant.grad`` scalars (summed over the grid -- the loss is scalar).
         Returns ``None``.
 

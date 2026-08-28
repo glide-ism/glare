@@ -47,7 +47,7 @@ def _t(a, requires_grad=True):
 
 # --------------------------------------------------------------------------- #
 # EnthalpyStep: forward returns smb; backward populates a gradient on each of the
-# thirteen differentiable inputs (incl. the optional debris field), and every
+# fourteen differentiable inputs (incl. the optional debris field), and every
 # gradient matches a direct model.forward()/model.adjoint() (the autograd wiring
 # adds nothing but bookkeeping).
 # --------------------------------------------------------------------------- #
@@ -72,15 +72,20 @@ def _enthalpy_step_case(with_avalanche):
     H_base0 = _t(0.6 * SECONDS_PER_YEAR)
     q_sw_bulk = _t(100.0 * SECONDS_PER_YEAR)
     q_sw_insol = _t(200.0 * SECONDS_PER_YEAR)
+    q_sw_dif = _t(300.0 * SECONDS_PER_YEAR)
     q_lw0 = _t(-30.0 * SECONDS_PER_YEAR)
     a_snow = _t(0.9)
     a_ice = _t(0.4)
     M_alb = _t(20.0)
     debris = _t(rng.uniform(0.2, 1.0, (ny, nx)))
+    # Diffuse-sky potential: forward-only input (no gradient), drawn last.
+    insol_dif = _t(rng.uniform(0.0, 0.4, (nt, ny, nx)), False)
     inputs = [t2m, precip, insol, t_base, H_atm, H_base0, q_sw_bulk, q_sw_insol,
-              q_lw0, a_snow, a_ice, M_alb, debris]
+              q_sw_dif, q_lw0, a_snow, a_ice, M_alb, debris]
 
-    smb = EnthalpyStep.apply(enth, *inputs)
+    smb = EnthalpyStep.apply(enth, t2m, precip, insol, insol_dif, t_base,
+                             H_atm, H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0,
+                             a_snow, a_ice, M_alb, debris)
     assert smb.shape == (nt, ny, nx) and smb.device.type == "cuda"
     # smb matches a plain forward on the same model.
     enth.forward()
@@ -109,6 +114,7 @@ def _enthalpy_step_case(with_avalanche):
                         (H_base0, g.thermodynamics.H_base0),
                         (q_sw_bulk, g.radiation.q_sw_bulk),
                         (q_sw_insol, g.radiation.q_sw_insol),
+                        (q_sw_dif, g.radiation.q_sw_dif),
                         (q_lw0, g.radiation.q_lw0),
                         (a_snow, g.radiation.albedo_snow),
                         (a_ice, g.radiation.albedo_ice),
@@ -231,9 +237,10 @@ def test_avalanche_step():
 
 @_maybe_skip
 def test_enthalpy_step_optional_args():
-    # Debris and temp_deviations are trailing optional args: the 12-input
+    # Debris and temp_deviations are trailing optional args: the 14-input
     # call still works (debris -> clean ice), and omitting debris after a debris
-    # call must reset the grid field rather than reuse the stale one.
+    # call must reset the grid field rather than reuse the stale one.  The same
+    # stale-state rule holds for insol_dif=None (slot 4) after a tensor call.
     rng = np.random.default_rng(1)
     nt, ny, nx = 12, 6, 5
     enth = EnthalpyModel(ny=ny, nx=nx, nt=nt, dx=100.0, dt=1 / nt,
@@ -241,17 +248,26 @@ def test_enthalpy_step_optional_args():
     args = [_t(rng.uniform(-10, 5, (nt, ny, nx)), False),
             _t(rng.uniform(0.0, 2.0, (nt, ny, nx)), False),
             _t(rng.uniform(0.0, 0.6, (nt, ny, nx)), False),
+            None,                                                     # insol_dif
             _t(rng.uniform(-12.0, -2.0, (ny, nx)), False),
             _t(1.0 * SECONDS_PER_YEAR, False), _t(0.6 * SECONDS_PER_YEAR, False),
             _t(100.0 * SECONDS_PER_YEAR, False), _t(200.0 * SECONDS_PER_YEAR, False),
-            _t(0.0, False),
+            _t(0.0, False),                                           # q_sw_dif
+            _t(0.0, False),                                           # q_lw0
             _t(0.9, False), _t(0.4, False), _t(20.0, False)]
     with torch.no_grad():
         clean = EnthalpyStep.apply(enth, *args)                       # legacy form
         dusty = EnthalpyStep.apply(enth, *args, _t(np.full((ny, nx), 0.3), False))
         clean_again = EnthalpyStep.apply(enth, *args)                 # resets debris
+        bright_args = list(args)
+        bright_args[3] = _t(np.full((nt, ny, nx), 0.5), False)       # insol_dif
+        bright_args[9] = _t(300.0 * SECONDS_PER_YEAR, False)          # q_sw_dif
+        bright = EnthalpyStep.apply(enth, *bright_args)
+        dark_again = EnthalpyStep.apply(enth, *args)                  # resets insol_dif
     assert not torch.equal(clean, dusty)
     assert torch.equal(clean, clean_again)
+    assert not torch.equal(clean, bright)
+    assert torch.equal(clean, dark_again)
 
 
 # --------------------------------------------------------------------------- #
