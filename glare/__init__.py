@@ -24,7 +24,7 @@ from .helpers import PanCarraBase
 from .grid import Grid, TIMGrid, EnthalpyGrid
 from .model import ImprovedTemperatureIndex
 from .avalanche import AvalancheOperator, partition_forward, partition_adjoint
-from .operators import GRAD_PARAM_NAMES
+from .operators import GRAD_PARAM_NAMES, FIELD_PARAM_NAMES, SCALAR_PARAM_NAMES
 from .enthalpy import (EnthalpyModel, State, Fluxes, step, run_column,
                        run_column_adjoint, generate_temp_deviations, scalar_params)
 
@@ -34,4 +34,4 @@ __all__ = ["PanCarraBase",
            "AvalancheOperator", "partition_forward", "partition_adjoint",
            "EnthalpyModel", "State", "Fluxes", "step", "run_column",
            "run_column_adjoint", "generate_temp_deviations", "scalar_params",
-           "GRAD_PARAM_NAMES"]
+           "GRAD_PARAM_NAMES", "FIELD_PARAM_NAMES", "SCALAR_PARAM_NAMES"]

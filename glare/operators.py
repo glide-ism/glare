@@ -117,10 +117,15 @@ class BackwardOperators:
 # so the launch is arg-free just like compute_smb.
 # =========================================================================== #
 
-# The energy-balance parameters the adjoint differentiates (their Constant.grad is
-# populated by EnthalpyBackwardOperators).  The thermodynamic constants are fixed.
+# The energy-balance parameters the adjoint differentiates.  The thermodynamic
+# constants are fixed.  FIELD_PARAM_NAMES are (ny,nx) Fields on the grid — their
+# per-pixel gradient planes land directly in Field.grad (like t_base/debris);
+# the rest are scalar Constants whose per-pixel planes are host-reduced onto
+# Constant.grad.
 GRAD_PARAM_NAMES = ("H_atm", "H_base0", "q_sw_bulk", "q_sw_insol", "q_sw_dif", "q_lw0",
                     "albedo_snow", "albedo_ice", "M_albedo")
+FIELD_PARAM_NAMES = ("H_atm", "q_sw_insol", "q_sw_dif")
+SCALAR_PARAM_NAMES = tuple(k for k in GRAD_PARAM_NAMES if k not in FIELD_PARAM_NAMES)
 
 
 def _inv_M_insulation(m_insulation):
@@ -163,8 +168,8 @@ class EnthalpyForwardOperators:
             g.geometry.debris.data,
             g.temp_dev,
             th.L_f.value, th.c_i.value, th.c_w.value,
-            th.H_atm.value, th.H_base0.value,
-            rad.q_sw_bulk.value, rad.q_sw_insol.value, rad.q_sw_dif.value, rad.q_lw0.value,
+            th.H_atm.data, th.H_base0.value,
+            rad.q_sw_bulk.value, rad.q_sw_insol.data, rad.q_sw_dif.data, rad.q_lw0.value,
             rad.albedo_snow.value, rad.albedo_ice.value, rad.M_albedo.value,
             tm.T_transition.value, f(_inv_M_insulation(th.M_insulation.value)),
             th.M_eps.value,
@@ -193,9 +198,11 @@ class EnthalpyBackwardOperators:
         self._seeds = {}
         self._zero_seed = None
 
-        # Per-pixel parameter-gradient scratch, reduced to the Constant.grad scalars.
+        # Per-pixel parameter-gradient scratch for the scalar Constants, reduced
+        # onto their Constant.grad. The field parameters (FIELD_PARAM_NAMES)
+        # need no scratch: the kernel writes their planes into Field.grad.
         self._pgrad = {k: cp.zeros((grid.ny, grid.nx), dtype=cp.float32)
-                       for k in GRAD_PARAM_NAMES}
+                       for k in SCALAR_PARAM_NAMES}
 
         # Write-only sink for cube-sized forcing gradients the caller does
         # not consume (see compute_gradient's `wanted`). Reuses the grid's
@@ -306,7 +313,10 @@ class EnthalpyBackwardOperators:
         f = cp.float32
         kernel(grid, block, (
             grad_t2m, grad_precip, grad_insol, grad_t_base, grad_debris,
-            pg["H_atm"], pg["H_base0"], pg["q_sw_bulk"], pg["q_sw_insol"], pg["q_sw_dif"],
+            # Field parameters: the kernel overwrites every element, so their
+            # planes land directly in Field.grad (lazily allocated on access).
+            th.H_atm.grad, pg["H_base0"], pg["q_sw_bulk"],
+            rad.q_sw_insol.grad, rad.q_sw_dif.grad,
             pg["q_lw0"],
             pg["albedo_snow"], pg["albedo_ice"], pg["M_albedo"],
             seeds["smb"], seeds["M"], seeds["E"],
@@ -319,8 +329,8 @@ class EnthalpyBackwardOperators:
             g.geometry.debris.data,
             g.temp_dev,
             th.L_f.value, th.c_i.value, th.c_w.value,
-            th.H_atm.value, th.H_base0.value,
-            rad.q_sw_bulk.value, rad.q_sw_insol.value, rad.q_sw_dif.value, rad.q_lw0.value,
+            th.H_atm.data, th.H_base0.value,
+            rad.q_sw_bulk.value, rad.q_sw_insol.data, rad.q_sw_dif.data, rad.q_lw0.value,
             rad.albedo_snow.value, rad.albedo_ice.value, rad.M_albedo.value,
             tm.T_transition.value, f(_inv_M_insulation(th.M_insulation.value)),
             th.M_eps.value,
@@ -329,11 +339,11 @@ class EnthalpyBackwardOperators:
             g.ny, g.nx, g.nt, cp.int32(g.n_substeps),
         ))
 
-        # Reduce the per-pixel parameter gradients onto the Constant.grad scalars.
+        # Reduce the scalar parameters' per-pixel gradients onto Constant.grad.
+        # The field parameters' planes are already in place.
         targets = {
-            "H_atm": th.H_atm, "H_base0": th.H_base0,
-            "q_sw_bulk": rad.q_sw_bulk, "q_sw_insol": rad.q_sw_insol,
-            "q_sw_dif": rad.q_sw_dif, "q_lw0": rad.q_lw0,
+            "H_base0": th.H_base0, "q_sw_bulk": rad.q_sw_bulk,
+            "q_lw0": rad.q_lw0,
             "albedo_snow": rad.albedo_snow, "albedo_ice": rad.albedo_ice,
             "M_albedo": rad.M_albedo,
         }

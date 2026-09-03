@@ -23,6 +23,7 @@ from glare import (EnthalpyGrid, EnthalpyModel, scalar_params, State, step,
                    run_column, run_column_adjoint, generate_temp_deviations,
                    GRAD_PARAM_NAMES, AvalancheOperator)
 from glare.enthalpy import _substep_forward, SECONDS_PER_YEAR
+from glare.operators import FIELD_PARAM_NAMES, SCALAR_PARAM_NAMES
 
 
 def _close(got, ref, rtol=1e-3, atol=0.0):
@@ -509,9 +510,11 @@ def test_run_column_adjoint_finite_difference():
 
 # --------------------------------------------------------------------------- #
 # The CUDA adjoint kernel reproduces the scalar reference column-by-column: the
-# forcing-gradient fields per pixel, and the reduced parameter gradients as the
-# sum of the reference's per-column parameter gradients.  fast-math off.  The GPU
-# gradients land in the grid .grad buffers.
+# forcing-gradient fields per pixel, the field parameters' (ny,nx) gradient
+# planes elementwise (against per-column reference values under a NON-uniform
+# parameter field), and the scalar parameters' reduced gradients as the sum of
+# the reference's per-column values.  fast-math off.  The GPU gradients land in
+# the grid .grad buffers.
 # --------------------------------------------------------------------------- #
 def _kernel_vs_reference_adjoint(n_sub, seed):
     rng = np.random.default_rng(seed)
@@ -528,14 +531,23 @@ def _kernel_vs_reference_adjoint(n_sub, seed):
     g.precipitation.precip.set(cp.asarray(precip))
     g.temperature.t2m.set(cp.asarray(t2m))
     g.radiation.insol_mean.set(cp.asarray(insol))
-    g.radiation.q_sw_insol.set(200.0 * SECONDS_PER_YEAR)
     g.geometry.t_base.set(cp.asarray(t_base))
     g.geometry.debris.set(cp.asarray(debris))
     # Diffuse sky: separate generator so the existing draws are unchanged.
     insol_dif = np.random.default_rng(seed + 1000).uniform(
         0.0, 0.4, (nt, ny, nx)).astype(np.float32)
     g.radiation.insol_dif.set(cp.asarray(insol_dif))
-    g.radiation.q_sw_dif.set(300.0 * SECONDS_PER_YEAR)
+    # The three spatially-varying parameter fields, deliberately NON-uniform so
+    # the per-pixel gradient planes are exercised pixel by pixel (separate
+    # generator, again to leave the pre-existing draws unchanged).
+    frng = np.random.default_rng(seed + 2000)
+    H_atm_f = (frng.uniform(0.5, 3.0, (ny, nx)) * SECONDS_PER_YEAR).astype(np.float32)
+    q_insol_f = (frng.uniform(100.0, 300.0, (ny, nx)) * SECONDS_PER_YEAR).astype(np.float32)
+    q_dif_f = (frng.uniform(150.0, 450.0, (ny, nx)) * SECONDS_PER_YEAR).astype(np.float32)
+    g.thermodynamics.H_atm.set(cp.asarray(H_atm_f))
+    g.radiation.q_sw_insol.set(cp.asarray(q_insol_f))
+    g.radiation.q_sw_dif.set(cp.asarray(q_dif_f))
+    field_np = {"H_atm": H_atm_f, "q_sw_insol": q_insol_f, "q_sw_dif": q_dif_f}
 
     dev = generate_temp_deviations(nt, n_sub, sigma=4.0, rng=rng) if n_sub > 1 else None
 
@@ -560,10 +572,15 @@ def _kernel_vs_reference_adjoint(n_sub, seed):
     ref_insol = np.zeros((nt, ny, nx))
     ref_t_base = np.zeros((ny, nx))
     ref_debris = np.zeros((ny, nx))
-    ref_params = {k: 0.0 for k in GRAD_PARAM_NAMES}
+    # Field parameters keep their per-column gradients as (ny,nx) planes; the
+    # scalar Constants' are summed over columns as before.
+    ref_params = {k: 0.0 for k in SCALAR_PARAM_NAMES}
+    ref_fields = {k: np.zeros((ny, nx)) for k in FIELD_PARAM_NAMES}
     dev_col = np.zeros((nt, 1)) if dev is None else dev
     for i in range(ny):
         for j in range(nx):
+            for k in FIELD_PARAM_NAMES:
+                setattr(p, k, float(field_np[k][i, j]))
             gr = run_column_adjoint(
                 precip[:, i, j], t2m[:, i, j], float(t_base[i, j]), dt, p=p,
                 start_month=start_month, insol=insol[:, i, j], temp_dev=dev_col,
@@ -576,17 +593,24 @@ def _kernel_vs_reference_adjoint(n_sub, seed):
             ref_insol[:, i, j] = gr["insol"]
             ref_t_base[i, j] = gr["t_base"]
             ref_debris[i, j] = gr["debris"]
-            for k in GRAD_PARAM_NAMES:
+            for k in SCALAR_PARAM_NAMES:
                 ref_params[k] += gr[k]
+            for k in FIELD_PARAM_NAMES:
+                ref_fields[k][i, j] = gr[k]
 
     assert _close(g_t2m, ref_t2m)
     assert _close(g_precip, ref_precip)
     assert _close(g_insol, ref_insol)
     assert _close(g_t_base, ref_t_base)
     assert _close(g_debris, ref_debris)
-    for k in GRAD_PARAM_NAMES:
+    for k in SCALAR_PARAM_NAMES:
         got, ref = _param_const(g, k).grad, ref_params[k]
         assert abs(got - ref) <= 1e-3 * (1.0 + abs(ref)), k
+    for k in FIELD_PARAM_NAMES:
+        got = cp.asnumpy(_param_const(g, k).grad)
+        ref = ref_fields[k]
+        scale = float(np.max(np.abs(ref))) + 1e-30
+        assert float(np.max(np.abs(got - ref))) <= 1e-3 * scale, k
 
 
 def test_kernel_adjoint_matches_reference():
@@ -633,9 +657,12 @@ def test_adjoint_gradient_check_end_to_end():
     enth.forward()
     enth.adjoint(grad_smb=cp.asarray(w))
     g_t2m = cp.asnumpy(g.temperature.t2m.grad)
-    g_H_atm = g.thermodynamics.H_atm.grad
+    # H_atm / q_sw_dif are (ny,nx) parameter fields: keep the full gradient
+    # plane (for the one-pixel FD) and its sum (for the uniform-fill FD).
+    g_H_atm_plane = cp.asnumpy(g.thermodynamics.H_atm.grad)
+    g_H_atm = float(g_H_atm_plane.sum())
     g_q_lw0 = g.radiation.q_lw0.grad
-    g_q_sw_dif = g.radiation.q_sw_dif.grad
+    g_q_sw_dif = float(g.radiation.q_sw_dif.grad.sum())
 
     # Central difference w.r.t. a handful of t2m cells.
     base_t2m = g.temperature.t2m.data.copy()
@@ -649,14 +676,28 @@ def test_adjoint_gradient_check_end_to_end():
         assert abs(g_t2m[mm, i, j] - num) <= 1e-2 * (1.0 + abs(num))
     g.temperature.t2m.set(base_t2m)
 
-    # Parameter gradient (scalar, reduced over the grid), perturbing the Constant.
-    base_H = float(g.thermodynamics.H_atm.value)
+    # Field-parameter gradient, uniform fill: the summed plane matches a
+    # uniform central difference (H_atm is a (ny,nx) field; the grid default
+    # is a constant fill, so data[0,0] is the fill value).
+    base_H = float(g.thermodynamics.H_atm.data[0, 0])
     h = 1e-2 * base_H
     g.thermodynamics.H_atm.set(base_H + h); Lp = loss()
     g.thermodynamics.H_atm.set(base_H - h); Lm = loss()
     g.thermodynamics.H_atm.set(base_H)
     num = (Lp - Lm) / (2 * h)
     assert abs(g_H_atm - num) <= 2e-2 * (1.0 + abs(num))
+
+    # Field-parameter gradient, single pixel: perturb H_atm at one cell only
+    # and compare against that cell's entry in the gradient plane.
+    pi, pj = 1, 2
+    pert = cp.full((ny, nx), base_H, dtype=cp.float32)
+    pert[pi, pj] = base_H + h
+    g.thermodynamics.H_atm.set(pert); Lp = loss()
+    pert[pi, pj] = base_H - h
+    g.thermodynamics.H_atm.set(pert); Lm = loss()
+    g.thermodynamics.H_atm.set(base_H)
+    num = (Lp - Lm) / (2 * h)
+    assert abs(g_H_atm_plane[pi, pj] - num) <= 2e-2 * (1.0 + abs(num))
 
     # The constant offset: absolute step (its natural scale is W m-2, not relative).
     base_q = float(g.radiation.q_lw0.value)
@@ -667,8 +708,8 @@ def test_adjoint_gradient_check_end_to_end():
     num = (Lp - Lm) / (2 * h)
     assert abs(g_q_lw0 - num) <= 2e-2 * (1.0 + abs(num))
 
-    # The diffuse-sky scale: absolute step as well.
-    base_q = float(g.radiation.q_sw_dif.value)
+    # The diffuse-sky scale (a field; uniform fill FD against the summed plane).
+    base_q = float(g.radiation.q_sw_dif.data[0, 0])
     h = 20.0 * SECONDS_PER_YEAR
     g.radiation.q_sw_dif.set(base_q + h); Lp = loss()
     g.radiation.q_sw_dif.set(base_q - h); Lm = loss()
@@ -705,10 +746,11 @@ def test_enthalpy_matches_etim_surface():
     out = em.adjoint(grad_smb=cp.ones((nt, ny, nx), dtype=cp.float32))
     assert out is None
     assert eg.temperature.t2m.grad.shape == (nt, ny, nx)
-    # Parameter gradient lands on the Constant as a scalar (cp.float32, per the
-    # Constant.grad setter -- the same convention as ETIM's mf/rf grads).
+    # H_atm is a (ny,nx) parameter field: its gradient is a per-pixel plane
+    # (the scalar Constants keep ETIM's summed-scalar convention).
     assert eg.thermodynamics.H_atm.has_grad()
-    assert np.isfinite(float(eg.thermodynamics.H_atm.grad))
+    assert eg.thermodynamics.H_atm.grad.shape == (ny, nx)
+    assert bool(cp.isfinite(eg.thermodynamics.H_atm.grad).all())
 
 
 # --------------------------------------------------------------------------- #

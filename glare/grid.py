@@ -167,11 +167,9 @@ class Thermodynamics:
         default_factory=lambda: Constant(
             value=cp.float32(4.184e3), name='c_w', units='J kg^{-1} K^{-1}',
             attrs={'long_name':'specific heat of water'}))
-    H_atm: Constant = field(
-        default_factory=lambda: Constant(
-            value=cp.float32(1.0*SECONDS_PER_YEAR), name='H_atm',
-            units='J m^{-2} yr^{-1} K^{-1}',
-            attrs={'long_name':'atmospheric heat-exchange coefficient'}))
+    # Spatially-varying (ny,nx) parameter field, allocated by EnthalpyGrid
+    # (the dataclass default has no grid shape). Adjoint target like t_base.
+    H_atm: Field | None = None
     H_base0: Constant = field(
         default_factory=lambda: Constant(
             value=cp.float32(0.6*SECONDS_PER_YEAR), name='H_base0',
@@ -202,16 +200,13 @@ class Radiation:
             value=cp.float32(100.0*SECONDS_PER_YEAR), name='q_sw_bulk',
             units='J m^{-2} yr^{-1}',
             attrs={'long_name':'constant (pre-albedo) shortwave flux'}))
-    q_sw_insol: Constant = field(
-        default_factory=lambda: Constant(
-            value=cp.float32(0.0), name='q_sw_insol', units='J m^{-2} yr^{-1}',
-            attrs={'long_name':'seasonal shortwave flux at full direct sun (x insolation)'}))
+    # Spatially-varying (ny,nx) parameter field (see Thermodynamics.H_atm):
+    # allocated by EnthalpyGrid, adjoint target.
+    q_sw_insol: Field | None = None
     # Diffuse-sky shortwave scale: absorbed diffuse = (1 - alpha) q_sw_dif insol_dif,
     # with insol_dif the geometric diffuse potential (1 = flat, unobstructed sky).
-    q_sw_dif: Constant = field(
-        default_factory=lambda: Constant(
-            value=cp.float32(0.0), name='q_sw_dif', units='J m^{-2} yr^{-1}',
-            attrs={'long_name':'diffuse-sky shortwave flux at unit diffuse potential'}))
+    # Spatially-varying (ny,nx) parameter field like q_sw_insol.
+    q_sw_dif: Field | None = None
     # Constant flux into the surface that is NOT albedo-scaled and NOT proportional
     # to (T_air - T_s): the dT-independent part of net longwave / latent exchange
     # (clear-sky longwave deficit, evaporation into sub-saturated air).  Negative
@@ -396,6 +391,25 @@ class EnthalpyGrid(Grid):
         self.temperature = temperature if temperature is not None else self._allocate_temperature()
         self.thermodynamics = thermodynamics if thermodynamics is not None else Thermodynamics()
         self.radiation = radiation if radiation is not None else self._allocate_radiation()
+
+        # The three spatially-varying energy-balance parameters are (ny,nx)
+        # Fields (adjoint targets like t_base/debris). They are allocated here
+        # rather than in the container dataclasses because the defaults have no
+        # grid shape; a caller-supplied container may carry its own Fields.
+        # Field.set() accepts a scalar (fills the plane) or an (ny,nx) array.
+        if self.thermodynamics.H_atm is None:
+            self.thermodynamics.H_atm = self._field(
+                'H_atm', 'J m^{-2} yr^{-1} K^{-1}',
+                'atmospheric heat-exchange coefficient',
+                fill=1.0 * SECONDS_PER_YEAR)
+        if self.radiation.q_sw_insol is None:
+            self.radiation.q_sw_insol = self._field(
+                'q_sw_insol', 'J m^{-2} yr^{-1}',
+                'seasonal shortwave flux at full direct sun (x insolation)')
+        if self.radiation.q_sw_dif is None:
+            self.radiation.q_sw_dif = self._field(
+                'q_sw_dif', 'J m^{-2} yr^{-1}',
+                'diffuse-sky shortwave flux at unit diffuse potential')
 
         # Spatially-uniform sub-step temperature deviations [C], (nt, n_substeps).
         # Filled by EnthalpyModel.forward() before each launch.

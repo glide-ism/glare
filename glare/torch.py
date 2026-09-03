@@ -92,9 +92,13 @@ class EnthalpyStep(torch.autograd.Function):
 
     Differentiable inputs (the full set the enthalpy adjoint produces gradients for):
     the forcing fields ``t2m``, ``precip``, ``insol_mean`` (all ``(nt, ny, nx)``) and
-    ``t_base`` (``(ny, nx)``), the nine energy-balance parameters
-    (``H_atm``, ``H_base0``, ``q_sw_bulk``, ``q_sw_insol``, ``q_sw_dif``, ``q_lw0``,
-    ``albedo_snow``, ``albedo_ice``, ``M_albedo``) as scalar tensors, and the optional ``debris``
+    ``t_base`` (``(ny, nx)``); the three spatially-varying energy-balance parameter
+    FIELDS ``H_atm``, ``q_sw_insol``, ``q_sw_dif`` (dense ``(ny, nx)`` tensors —
+    a spatially-constant parameter is a broadcast field, e.g.
+    ``scalar.expand(ny, nx).contiguous()``, whose autograd backward reduces the
+    ``(ny, nx)`` gradient onto the scalar); the six scalar energy-balance parameters
+    (``H_base0``, ``q_sw_bulk``, ``q_lw0``, ``albedo_snow``, ``albedo_ice``,
+    ``M_albedo``) as 0-d tensors; and the optional ``debris``
     melt-attenuation field (``(ny, nx)``, 1 = clean ice; ``None`` sets the grid to
     clean ice, mirroring how :class:`GlareStep` carries ETIM's debris field).
     ``insol_dif`` (``(nt, ny, nx)``, the diffuse-sky potential, or ``None`` for zeros)
@@ -212,11 +216,15 @@ class EnthalpyStep(torch.autograd.Function):
             g.geometry.debris.set(1.0)              # clean ice, no attenuation
         else:
             g.geometry.debris.set(cp.asarray(debris.data))
-        g.thermodynamics.H_atm.set(cp.float32(H_atm.item()))
+        # H_atm / q_sw_insol / q_sw_dif are (ny,nx) parameter FIELDS: pass
+        # dense (contiguous) 2-d tensors; a spatially-constant parameter is a
+        # broadcast field (e.g. scalar.expand(ny, nx).contiguous(), whose
+        # autograd backward sums the field gradient onto the scalar).
+        g.thermodynamics.H_atm.set(cp.asarray(H_atm.data))
         g.thermodynamics.H_base0.set(cp.float32(H_base0.item()))
         g.radiation.q_sw_bulk.set(cp.float32(q_sw_bulk.item()))
-        g.radiation.q_sw_insol.set(cp.float32(q_sw_insol.item()))
-        g.radiation.q_sw_dif.set(cp.float32(q_sw_dif.item()))
+        g.radiation.q_sw_insol.set(cp.asarray(q_sw_insol.data))
+        g.radiation.q_sw_dif.set(cp.asarray(q_sw_dif.data))
         g.radiation.q_lw0.set(cp.float32(q_lw0.item()))
         g.radiation.albedo_snow.set(cp.float32(albedo_snow.item()))
         g.radiation.albedo_ice.set(cp.float32(albedo_ice.item()))

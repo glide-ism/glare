@@ -42,7 +42,10 @@ The model is reverse-mode differentiable: :func:`run_column_adjoint` (scalar) an
 in ``compute_smb_grad``.  Like ETIM, the adjoint writes gradients directly into the
 grid's ``Field.grad`` / ``Constant.grad`` buffers: the forcing (``t2m``, ``precip``,
 ``insol_mean``, ``t_base``) and the nine energy-balance parameters in
-:data:`~glare.operators.GRAD_PARAM_NAMES`.  Burial of the active reservoir into ice
+:data:`~glare.operators.GRAD_PARAM_NAMES` — of which the three in
+:data:`~glare.operators.FIELD_PARAM_NAMES` (``H_atm``, ``q_sw_insol``, ``q_sw_dif``)
+are spatially-varying ``(ny, nx)`` Fields with per-pixel gradient planes, the other
+six scalar Constants with grid-summed gradients.  Burial of the active reservoir into ice
 (``M_active_max``) is not applied in v1, matching the reference ``step``.
 """
 
@@ -79,24 +82,26 @@ class Fluxes:
     T_surface: float = np.nan
 
 
-def scalar_params(grid) -> SimpleNamespace:
-    """Read the enthalpy scalar parameters off an ``EnthalpyGrid`` as Python floats.
+def scalar_params(grid, i: int = 0, j: int = 0) -> SimpleNamespace:
+    """Read the enthalpy parameters off an ``EnthalpyGrid`` as Python floats.
 
-    The grid ``Constant``s are the single source of truth for the parameters (there is
-    no ``Parameters`` dataclass); this returns a lightweight read-only view the NumPy
-    scalar reference (:func:`step`/:func:`run_column`) consumes via ``p.<attr>``,
+    The grid ``Constant``s/parameter ``Field``s are the single source of truth (there
+    is no ``Parameters`` dataclass); this returns a lightweight read-only view the
+    NumPy scalar reference (:func:`step`/:func:`run_column`) consumes via ``p.<attr>``,
     including a precomputed ``inv_M_insulation`` (0 when the insulation scale is
-    infinite/invalid, i.e. a constant basal conductance).  It touches only scalars, so
-    the reference stays pure-NumPy once the view is built.
+    infinite/invalid, i.e. a constant basal conductance).  The three spatially-varying
+    parameter fields (``H_atm``, ``q_sw_insol``, ``q_sw_dif``) are read at pixel
+    ``(i, j)`` — the reference is per-column, so a caller sweeping a non-uniform grid
+    builds one view per column (or overrides ``p.H_atm`` etc. directly).
     """
     th, rad, tm = grid.thermodynamics, grid.radiation, grid.temperature
     m_ins = float(th.M_insulation.value)
     inv = 1.0 / m_ins if (m_ins and np.isfinite(m_ins) and m_ins > 0.0) else 0.0
     return SimpleNamespace(
         L_f=float(th.L_f.value), c_i=float(th.c_i.value), c_w=float(th.c_w.value),
-        H_atm=float(th.H_atm.value), H_base0=float(th.H_base0.value),
-        q_sw_bulk=float(rad.q_sw_bulk.value), q_sw_insol=float(rad.q_sw_insol.value),
-        q_lw0=float(rad.q_lw0.value), q_sw_dif=float(rad.q_sw_dif.value),
+        H_atm=float(th.H_atm.data[i, j]), H_base0=float(th.H_base0.value),
+        q_sw_bulk=float(rad.q_sw_bulk.value), q_sw_insol=float(rad.q_sw_insol.data[i, j]),
+        q_lw0=float(rad.q_lw0.value), q_sw_dif=float(rad.q_sw_dif.data[i, j]),
         albedo_snow=float(rad.albedo_snow.value), albedo_ice=float(rad.albedo_ice.value),
         M_albedo=float(rad.M_albedo.value),
         T_transition=float(tm.T_transition.value),
@@ -814,8 +819,10 @@ class EnthalpyModel:
         **writes the gradients directly into the grid** (like ETIM's adjoint): the
         forcing gradients into ``grid.temperature.t2m.grad``,
         ``grid.precipitation.precip.grad``, ``grid.radiation.insol_mean.grad``,
-        ``grid.geometry.t_base.grad`` and ``grid.geometry.debris.grad``, and the
-        nine energy-balance parameter gradients into the corresponding
+        ``grid.geometry.t_base.grad`` and ``grid.geometry.debris.grad``; the three
+        spatially-varying parameter fields' per-pixel gradients into their
+        ``Field.grad`` planes (``H_atm``, ``q_sw_insol``, ``q_sw_dif``); and the
+        six scalar energy-balance parameter gradients into the corresponding
         ``Constant.grad`` scalars (summed over the grid -- the loss is scalar).
         Returns ``None``.
 

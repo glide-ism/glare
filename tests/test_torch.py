@@ -68,11 +68,14 @@ def _enthalpy_step_case(with_avalanche):
     precip = _t(rng.uniform(0.0, 2.0, (nt, ny, nx)))
     insol = _t(rng.uniform(0.0, 0.6, (nt, ny, nx)))
     t_base = _t(rng.uniform(-12.0, -2.0, (ny, nx)))
-    H_atm = _t(1.0 * SECONDS_PER_YEAR)
+    # The three spatially-varying parameter fields: non-uniform (ny,nx) tensors
+    # (a separate generator so the pre-existing draws above are unchanged).
+    prng = np.random.default_rng(1234)
+    H_atm = _t(prng.uniform(0.5, 3.0, (ny, nx)) * SECONDS_PER_YEAR)
+    q_sw_insol = _t(prng.uniform(100.0, 300.0, (ny, nx)) * SECONDS_PER_YEAR)
+    q_sw_dif = _t(prng.uniform(150.0, 450.0, (ny, nx)) * SECONDS_PER_YEAR)
     H_base0 = _t(0.6 * SECONDS_PER_YEAR)
     q_sw_bulk = _t(100.0 * SECONDS_PER_YEAR)
-    q_sw_insol = _t(200.0 * SECONDS_PER_YEAR)
-    q_sw_dif = _t(300.0 * SECONDS_PER_YEAR)
     q_lw0 = _t(-30.0 * SECONDS_PER_YEAR)
     a_snow = _t(0.9)
     a_ice = _t(0.4)
@@ -110,11 +113,19 @@ def _enthalpy_step_case(with_avalanche):
     assert close_field(insol, g.radiation.insol_mean.grad) <= tol
     assert close_field(t_base, g.geometry.t_base.grad) <= tol
     assert close_field(debris, g.geometry.debris.grad) <= tol
-    for tens, const in ((H_atm, g.thermodynamics.H_atm),
-                        (H_base0, g.thermodynamics.H_base0),
+    # Field parameters: (ny,nx) gradient planes, compared elementwise relative
+    # to the plane's magnitude (their absolute scale is ~1/SECONDS_PER_YEAR).
+    def close_plane(t, cparr):
+        a = t.grad.detach().cpu().numpy()
+        b = cp.asnumpy(cparr)
+        return float(np.max(np.abs(a - b))) <= 1e-3 * float(np.max(np.abs(b)) + 1e-30)
+
+    assert H_atm.grad.shape == (ny, nx)
+    assert close_plane(H_atm, g.thermodynamics.H_atm.grad)
+    assert close_plane(q_sw_insol, g.radiation.q_sw_insol.grad)
+    assert close_plane(q_sw_dif, g.radiation.q_sw_dif.grad)
+    for tens, const in ((H_base0, g.thermodynamics.H_base0),
                         (q_sw_bulk, g.radiation.q_sw_bulk),
-                        (q_sw_insol, g.radiation.q_sw_insol),
-                        (q_sw_dif, g.radiation.q_sw_dif),
                         (q_lw0, g.radiation.q_lw0),
                         (a_snow, g.radiation.albedo_snow),
                         (a_ice, g.radiation.albedo_ice),
@@ -250,9 +261,11 @@ def test_enthalpy_step_optional_args():
             _t(rng.uniform(0.0, 0.6, (nt, ny, nx)), False),
             None,                                                     # insol_dif
             _t(rng.uniform(-12.0, -2.0, (ny, nx)), False),
-            _t(1.0 * SECONDS_PER_YEAR, False), _t(0.6 * SECONDS_PER_YEAR, False),
-            _t(100.0 * SECONDS_PER_YEAR, False), _t(200.0 * SECONDS_PER_YEAR, False),
-            _t(0.0, False),                                           # q_sw_dif
+            _t(np.full((ny, nx), 1.0 * SECONDS_PER_YEAR), False),     # H_atm (field)
+            _t(0.6 * SECONDS_PER_YEAR, False),
+            _t(100.0 * SECONDS_PER_YEAR, False),
+            _t(np.full((ny, nx), 200.0 * SECONDS_PER_YEAR), False),   # q_sw_insol (field)
+            _t(np.zeros((ny, nx)), False),                            # q_sw_dif (field)
             _t(0.0, False),                                           # q_lw0
             _t(0.9, False), _t(0.4, False), _t(20.0, False)]
     with torch.no_grad():
@@ -261,7 +274,7 @@ def test_enthalpy_step_optional_args():
         clean_again = EnthalpyStep.apply(enth, *args)                 # resets debris
         bright_args = list(args)
         bright_args[3] = _t(np.full((nt, ny, nx), 0.5), False)       # insol_dif
-        bright_args[9] = _t(300.0 * SECONDS_PER_YEAR, False)          # q_sw_dif
+        bright_args[9] = _t(np.full((ny, nx), 300.0 * SECONDS_PER_YEAR), False)  # q_sw_dif
         bright = EnthalpyStep.apply(enth, *bright_args)
         dark_again = EnthalpyStep.apply(enth, *args)                  # resets insol_dif
     assert not torch.equal(clean, dusty)

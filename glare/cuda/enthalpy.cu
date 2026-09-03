@@ -66,8 +66,12 @@ extern "C" __global__ void compute_enthalpy(
     const float* __restrict__ debris,   // (ny,nx)    melt attenuation for snow-free ice [0,1]
     const float* __restrict__ temp_dev, // (nt,n_sub) sub-step air-temperature deviations [C]
     float L_f, float c_i, float c_w,
-    float H_atm, float H_base0,
-    float q_sw_bulk, float q_sw_insol, float q_sw_dif, float q_lw0,
+    const float* __restrict__ H_atm_f,      // (ny,nx) atmospheric heat exchange
+    float H_base0,
+    float q_sw_bulk,
+    const float* __restrict__ q_sw_insol_f, // (ny,nx) direct-beam shortwave scale
+    const float* __restrict__ q_sw_dif_f,   // (ny,nx) diffuse-sky shortwave scale
+    float q_lw0,
     float albedo_snow, float albedo_ice, float M_albedo,
     float T_transition, float inv_M_insulation, float M_eps,
     float rho_w, float dt, int glacier_surface,
@@ -81,6 +85,10 @@ extern "C" __global__ void compute_enthalpy(
     int slab = ny * nx;
     float Tb = t_base[pix];
     float D = debris[pix];   // multiplies every glacier-ice melt flux (1 = clean ice)
+    // Per-pixel energy-balance parameters (spatially varying fields).
+    float H_atm = H_atm_f[pix];
+    float q_sw_insol = q_sw_insol_f[pix];
+    float q_sw_dif = q_sw_dif_f[pix];
 
     float M = 0.0f;   // active reservoir mass    [kg m-2], >= 0
     float E = 0.0f;   // active reservoir enthalpy [J m-2], <= 0 when retained
@@ -216,9 +224,10 @@ extern "C" __global__ void compute_enthalpy(
 // (enth_substep, filling an EnthIm) and transposed (enth_substep_back).
 //
 // Differentiation targets: the forcing (t2m, precip, insol, t_base), the static
-// debris melt-attenuation field, and the nine energy-balance parameters (H_atm,
-// H_base0, q_sw_bulk, q_sw_insol, q_sw_dif, q_lw0, albedo_snow, albedo_ice,
-// M_albedo); the diffuse potential insol_dif is static geometry (no gradient).  The
+// debris melt-attenuation field, the three spatially-varying (ny,nx) energy-balance
+// parameter fields (H_atm, q_sw_insol, q_sw_dif), and the six scalar energy-balance
+// parameters (H_base0, q_sw_bulk, q_lw0, albedo_snow, albedo_ice, M_albedo); the
+// diffuse potential insol_dif is static geometry (no gradient).  The
 // thermodynamic constants (L_f, c_i, c_w, T_transition, M_insulation, rho_w) are
 // held fixed.  The loss is seeded through the mass/energy
 // outputs (smb, M, E, runoff, ice_melt); the pure diagnostics (t_surface, albedo)
@@ -446,7 +455,8 @@ extern "C" __global__ void compute_enthalpy_grad(
     float* grad_insol,     // (nt,ny,nx)
     float* __restrict__ grad_t_base,    // (ny,nx)
     float* __restrict__ grad_debris,    // (ny,nx)
-    float* __restrict__ grad_H_atm,     // (ny,nx)  per-pixel; host reduces to a scalar
+    float* __restrict__ grad_H_atm,     // (ny,nx)  per-pixel field gradient (H_atm is a field);
+                                        //          the scalar parameters' planes are host-reduced
     float* __restrict__ grad_H_base0,   // (ny,nx)
     float* __restrict__ grad_q_sw_bulk, // (ny,nx)
     float* __restrict__ grad_q_sw_insol,// (ny,nx)
@@ -470,8 +480,12 @@ extern "C" __global__ void compute_enthalpy_grad(
     const float* __restrict__ debris,
     const float* __restrict__ temp_dev,
     float L_f, float c_i, float c_w,
-    float H_atm, float H_base0,
-    float q_sw_bulk, float q_sw_insol, float q_sw_dif, float q_lw0,
+    const float* __restrict__ H_atm_f,      // (ny,nx)
+    float H_base0,
+    float q_sw_bulk,
+    const float* __restrict__ q_sw_insol_f, // (ny,nx)
+    const float* __restrict__ q_sw_dif_f,   // (ny,nx)
+    float q_lw0,
     float albedo_snow, float albedo_ice, float M_albedo,
     float T_transition, float inv_M_insulation, float M_eps,
     float rho_w, float dt, int glacier_surface,
@@ -489,9 +503,9 @@ extern "C" __global__ void compute_enthalpy_grad(
     float inv = 1.0f / (rho_w * dt);
 
     EnthPar pr;
-    pr.L_f = L_f; pr.c_i = c_i; pr.c_w = c_w; pr.H_atm = H_atm;
-    pr.H_base0 = H_base0; pr.q_sw_bulk = q_sw_bulk; pr.q_sw_insol = q_sw_insol;
-    pr.q_sw_dif = q_sw_dif; pr.q_lw0 = q_lw0;
+    pr.L_f = L_f; pr.c_i = c_i; pr.c_w = c_w; pr.H_atm = H_atm_f[pix];
+    pr.H_base0 = H_base0; pr.q_sw_bulk = q_sw_bulk; pr.q_sw_insol = q_sw_insol_f[pix];
+    pr.q_sw_dif = q_sw_dif_f[pix]; pr.q_lw0 = q_lw0;
     pr.albedo_snow = albedo_snow; pr.albedo_ice = albedo_ice;
     pr.M_albedo = M_albedo; pr.T_transition = T_transition;
     pr.inv_M_insulation = inv_M_insulation; pr.M_eps = M_eps; pr.rho_w = rho_w;
