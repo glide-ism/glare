@@ -81,6 +81,7 @@ grid.radiation.insol_mean.set(ins.monthly_solar_potential_mean.values)
 # Shortwave comes entirely from the seasonal insolation field (q_sw_bulk = 0):
 # absorbed flux = (1 - albedo) * q_sw_insol * insol_mean, with q_sw_insol the
 # clear-sky flux at full direct sun (insol = 1).  Parameters live on the grid.
+grid.radiation.q_lw0.set(-40 * SECONDS_PER_YEAR)
 grid.radiation.q_sw_bulk.set(0.0)
 grid.radiation.q_sw_insol.set(600.0 * SECONDS_PER_YEAR)   # J m-2 yr-1 at insol = 1
 grid.thermodynamics.H_atm.set(20 * SECONDS_PER_YEAR)
